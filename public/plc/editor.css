@@ -2,3 +2,5 @@
 .navlink{color:white;margin-right:12px;text-decoration:underline;font-size:14px}header nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 .remote{background:white;border:1px solid #cddce4;border-radius:6px;padding:12px;margin:12px 0}.remote select{padding:8px;max-width:100%}.remote p{overflow-wrap:anywhere;margin:8px 0}.remote #stopRemote{background:#964040;color:white}
+
+.remote #runRemote{background:#176d54;color:white}.remote #runRemote:disabled{opacity:.45}.remote .muted{font-size:13px;color:#526b7c}
