@@ -7,8 +7,8 @@
     "node": ">=22 <25"
   },
   "scripts": {
-    "start": "node server/index.mjs",
-    "test": "node --test server/validation.test.mjs"
+    "start": "node server/start.mjs",
+    "test": "node --check server/start.mjs && node --check server/bootstrap.mjs && node --check server/index.mjs && node --check public/app.js && node --test server/validation.test.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",
