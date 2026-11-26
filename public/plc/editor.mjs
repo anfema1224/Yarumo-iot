@@ -102,7 +102,7 @@ async function loadState(){
  finally{remotePolling=false;paintRemote();}
 }
 async function remoteAction(action){
- if(remoteBusy||remotePolling)return;const d=target();if(!d)return;
+ if(remoteBusy)return;if(remotePolling&&action!=='stop')return remoteMessage('Actualizando estado, vuelve a pulsar.');const d=target();if(!d)return;
  if(action!=='stop'&&!editing())return remoteMessage('Detén primero la simulación virtual.');
  if(action==='load'){if(!remoteData?.saved)return;if(!confirm('¿Reemplazar el diagrama actual por el programa guardado?'))return;graph=structuredClone(remoteData.saved.graph);seq=0;selected=source=compiled=sim=null;redraw();return remoteMessage('Programa abierto.');}
  if(action==='save'&&!check())return;
