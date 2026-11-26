@@ -4,7 +4,7 @@ import {randomBytes,randomUUID,createHash,scrypt,timingSafeEqual} from 'node:cry
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
 import {command,snapshot,isUuid,maxPulse} from './validation.mjs';
-import {registerPlcRoutes,pollPlc,expirePlc} from './plc-remote.mjs';
+import {registerPlcRoutes,pollPlc,expirePlc,acknowledgePlc} from './plc-remote.mjs';
 const {Pool}=pg;
 const derive=promisify(scrypt);
 const hash=v=>createHash('sha256').update(v).digest('hex');
@@ -123,7 +123,7 @@ app.post('/api/device/poll',throttle('poll:',300,60000),asyncRoute(async(req,res
    else {await c.query("UPDATE commands SET state='delivered',delivered_at=now() WHERE id=$1",[outgoing.id]);if(hold)outgoing={...outgoing,action:'on'};}
  }
  if(!outgoing)outgoing=await pollPlc(c,d.id,s,ack);
- else if(ack&&isUuid(ack.id)&&['executed','rejected'].includes(ack.state))await c.query("UPDATE plc_jobs SET state=CASE WHEN $1='executed' AND revision::text<>$4 THEN 'unknown' ELSE $1 END,finished_at=now() WHERE id=$2 AND device_id=$3 AND state='delivered'",[ack.state,ack.id,d.id,s.plc_revision||'']);
+ else await acknowledgePlc(c,d.id,s,ack);
  await c.query('COMMIT');res.json({command:outgoing});
  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }));
