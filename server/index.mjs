@@ -3,7 +3,7 @@ import pg from 'pg';
 import {randomBytes,randomUUID,createHash,scrypt,timingSafeEqual} from 'node:crypto';
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
-import {command,snapshot,isUuid} from './validation.mjs';
+import {command,snapshot,isUuid,maxPulse} from './validation.mjs';
 const {Pool}=pg;
 const derive=promisify(scrypt);
 const hash=v=>createHash('sha256').update(v).digest('hex');
@@ -85,6 +85,7 @@ app.post('/api/devices/:id/commands',csrf,auth,throttle('cmd:',90,60000),asyncRo
  const c=await pool.connect();try{await c.query('BEGIN');
  const d=await c.query("SELECT id,snapshot,COALESCE(last_seen>now()-interval '15 seconds',false) AS online FROM devices WHERE id=$1 AND owner_id=$2 FOR UPDATE",[req.params.id,req.user.id]);
  if(!d.rowCount||!d.rows[0].online){await c.query('ROLLBACK');return res.status(409).json({error:'Dispositivo no disponible'});}
+ if(cmd.action==='pulse'&&cmd.ms>maxPulse(d.rows[0].snapshot)){await c.query('ROLLBACK');return res.status(409).json({error:'El firmware admite máximo '+maxPulse(d.rows[0].snapshot)/1000+' segundos. Actualízalo.'});}
  if(cmd.action==='pulse'&&cmd.ms===0&&d.rows[0].snapshot?.hold_supported!==true){await c.query('ROLLBACK');return res.status(409).json({error:'Actualiza el firmware para encendido continuo'});}
  await c.query("UPDATE commands SET state='expired',finished_at=now() WHERE device_id=$1 AND state='queued' AND expires_at<=now()",[req.params.id]);
  if(cmd.action==='pulse'){const p=await c.query("SELECT 1 FROM commands WHERE device_id=$1 AND state='queued'",[req.params.id]);if(p.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Hay una orden pendiente'});}}
@@ -110,7 +111,7 @@ app.post('/api/device/poll',throttle('poll:',300,60000),asyncRoute(async(req,res
  let outgoing=q.rows[0]||null;
  if(outgoing){
    const hold=outgoing.action==='pulse'&&outgoing.ms===0;
-   if(hold&&!s.hold_supported){await c.query("UPDATE commands SET state='rejected',finished_at=now() WHERE id=$1",[outgoing.id]);outgoing=null;}
+   if((hold&&!s.hold_supported)||(outgoing.action==='pulse'&&outgoing.ms>maxPulse(s))){await c.query("UPDATE commands SET state='rejected',finished_at=now() WHERE id=$1",[outgoing.id]);outgoing=null;}
    else {await c.query("UPDATE commands SET state='delivered',delivered_at=now() WHERE id=$1",[outgoing.id]);if(hold)outgoing={...outgoing,action:'on'};}
  }
  await c.query('COMMIT');res.json({command:outgoing});
