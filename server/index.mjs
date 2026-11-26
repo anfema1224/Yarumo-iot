@@ -2,7 +2,6 @@ import express from 'express';
 import pg from 'pg';
 import {randomBytes,randomUUID,createHash,scrypt,timingSafeEqual} from 'node:crypto';
 import {promisify} from 'node:util';
-import {readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {command,snapshot,isUuid} from './validation.mjs';
 const {Pool}=pg;
@@ -13,8 +12,8 @@ const safeEq=(a,b)=>typeof a==='string'&&typeof b==='string'&&timingSafeEqual(Bu
 const invite=process.env.REGISTRATION_CODE||'';
 if(!process.env.DATABASE_URL) throw Error('DATABASE_URL required');
 if(invite.length<24) throw Error('REGISTRATION_CODE must have at least 24 characters');
-const pool=new Pool({connectionString:process.env.DATABASE_URL,max:5,connectionTimeoutMillis:5000,statement_timeout:5000});
-await pool.query(await readFile(new URL('./schema.sql',import.meta.url),'utf8'));
+const pool=new Pool({connectionString:process.env.DATABASE_URL,options:'-c search_path=pg_catalog,iot',max:5,connectionTimeoutMillis:5000,statement_timeout:5000});
+await pool.query('SELECT 1 FROM iot.users LIMIT 1');
 const app=express();app.disable('x-powered-by');app.set('trust proxy',1);
 app.use(express.json({limit:'8kb'}));
 app.use((req,res,next)=>{res.set({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});next();});
