@@ -34,7 +34,7 @@
 #define YARUMO_REPLACE_CONFIG 0
 #endif
 
-constexpr char VERSION[] = "0.3.2";
+constexpr char VERSION[] = "0.3.3";
 char WIFI_SSID[33] = {};
 char WIFI_PASS[65] = {};
 char OTA_PASS[129] = {};
@@ -101,19 +101,19 @@ bool discardLine = false;
 // Keep this namespace/key stable across releases and compatible OTA partitions.
 constexpr char CFG_KEY[] = "cfg_v1";
 constexpr size_t CFG_MAX = 8192;
-template <size_t N>
-bool copyField(JsonObjectConst obj, const char* name, char (&dest)[N]) {
+// Explicit buffer size avoids Arduino sketch auto-prototype issues with array-reference templates.
+bool copyField(JsonObjectConst obj, const char* name, char* dest, size_t capacity) {
   if (!obj[name].is<const char*>()) return false;
   const char* value = obj[name].as<const char*>();
-  if (strlen(value) >= N) return false;
-  strlcpy(dest, value, N);
+  if (capacity == 0 || strlen(value) >= capacity) return false;
+  strlcpy(dest, value, capacity);
   return true;
 }
 bool loadFields(JsonObjectConst obj) {
   if (obj["schema"].as<int>() != 1) return false;
-  if (!copyField(obj,"ssid",WIFI_SSID) || !copyField(obj,"wifi",WIFI_PASS) ||
-      !copyField(obj,"ota",OTA_PASS) || !copyField(obj,"web",WEB_PASS) ||
-      !copyField(obj,"token",CLOUD_TOKEN) || !copyField(obj,"ca",CLOUD_CA)) return false;
+  if (!copyField(obj,"ssid",WIFI_SSID,sizeof(WIFI_SSID)) || !copyField(obj,"wifi",WIFI_PASS,sizeof(WIFI_PASS)) ||
+      !copyField(obj,"ota",OTA_PASS,sizeof(OTA_PASS)) || !copyField(obj,"web",WEB_PASS,sizeof(WEB_PASS)) ||
+      !copyField(obj,"token",CLOUD_TOKEN,sizeof(CLOUD_TOKEN)) || !copyField(obj,"ca",CLOUD_CA,sizeof(CLOUD_CA))) return false;
   if (!WIFI_SSID[0] || !strcmp(WIFI_SSID,"TU_RED_WIFI") ||
       strlen(WIFI_PASS)<8 || !strcmp(WIFI_PASS,"TU_CLAVE_WIFI") ||
       !OTA_PASS[0] || !strcmp(OTA_PASS,"TU_CLAVE_OTA") ||
@@ -301,7 +301,7 @@ void readSerial() {
 
 const char PAGE[] PROGMEM = R"YARUMOHTML(<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Yarumo IoT X4</title><style>
 *{box-sizing:border-box}body{margin:0;background:#eef3f7;color:#152b3c;font:16px system-ui,sans-serif}header{background:#153d55;color:white;padding:20px}main{max-width:900px;margin:auto;padding:16px}h1{margin:0;font-size:25px}h2{font-size:19px}p{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.card{background:white;border:1px solid #d5e0e9;border-radius:12px;padding:14px}.val{font-size:24px;font-weight:bold;margin:8px 0}.muted{color:#526879;font-size:13px}button,input{font:inherit;padding:10px;border-radius:7px}button{border:0;background:#176b80;color:white;cursor:pointer;margin:4px 0}button:disabled{opacity:.45}button.off{background:#933e3e}input{width:100%;border:1px solid #aebfcb}.status{padding:10px;background:white;border-radius:8px;min-height:42px}.on{color:#077346}.idle{color:#526879}footer{font-size:13px;margin:20px 0;color:#526879}
-</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.3.2 · Panel local</p></header><main>
+</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.3.3 · Panel local</p></header><main>
 <p id="status" class="status" role="status">Conectando...</p><p id="info" class="muted"></p>
 <h2>Entradas digitales</h2><div id="di" class="grid"></div>
 <h2>Entradas analógicas</h2><div id="ai" class="grid"></div>
