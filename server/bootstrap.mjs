@@ -28,7 +28,7 @@ export async function verifyRuntime(){
    if(r.rowCount!==1)throw diagnostic('ROLE_NOT_FOUND');
    const failed=Object.entries(r.rows[0]).filter(([,v])=>v!==true).map(([k])=>k.toUpperCase());
    if(failed.length)throw diagnostic('ROLE_CHECK_'+failed.join('_'));
-   for(const table of ['users','sessions','devices','readings','commands']){
+   for(const table of ['users','sessions','devices','readings','commands','plc_programs','plc_jobs']){
      const p=await pool.query("SELECT has_table_privilege(current_user,$1,'SELECT') AND has_table_privilege(current_user,$1,'INSERT') AND has_table_privilege(current_user,$1,'UPDATE') AND has_table_privilege(current_user,$1,'DELETE') AS ok",['iot.'+table]);
      if(!p.rows[0]?.ok)throw diagnostic('TABLE_GRANTS_'+table.toUpperCase());
    }

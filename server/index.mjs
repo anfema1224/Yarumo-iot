@@ -4,6 +4,7 @@ import {randomBytes,randomUUID,createHash,scrypt,timingSafeEqual} from 'node:cry
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
 import {command,snapshot,isUuid,maxPulse} from './validation.mjs';
+import {registerPlcRoutes,pollPlc,expirePlc} from './plc-remote.mjs';
 const {Pool}=pg;
 const derive=promisify(scrypt);
 const hash=v=>createHash('sha256').update(v).digest('hex');
@@ -15,7 +16,7 @@ if(invite.length<24) throw Error('REGISTRATION_CODE must have at least 24 charac
 const pool=new Pool({connectionString:process.env.DATABASE_URL,options:'-c search_path=pg_catalog,iot',max:5,connectionTimeoutMillis:5000,statement_timeout:5000});
 await pool.query('SELECT 1 FROM iot.users LIMIT 1');
 const app=express();app.disable('x-powered-by');app.set('trust proxy',1);
-app.use(express.json({limit:'8kb'}));
+app.use(express.json({limit:'24kb'}));
 app.use((req,res,next)=>{res.set({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});next();});
 const asyncRoute=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
 const limits=new Map();
@@ -80,11 +81,17 @@ app.get('/api/devices/:id/commands',auth,asyncRoute(async(req,res)=>{
  if(!isUuid(req.params.id))return res.sendStatus(404);
  const r=await pool.query('SELECT c.id,c.action,c.relay,c.ms,c.state,c.created_at FROM commands c JOIN devices d ON d.id=c.device_id WHERE d.id=$1 AND d.owner_id=$2 ORDER BY c.created_at DESC LIMIT 20',[req.params.id,req.user.id]);res.json(r.rows);
 }));
+registerPlcRoutes(app,{pool,auth,csrf,asyncRoute,throttle});
 app.post('/api/devices/:id/commands',csrf,auth,throttle('cmd:',90,60000),asyncRoute(async(req,res)=>{
  const cmd=command(req.body);if(!isUuid(req.params.id)||!cmd)return res.status(400).json({error:'Orden inválida'});
  const c=await pool.connect();try{await c.query('BEGIN');
  const d=await c.query("SELECT id,snapshot,COALESCE(last_seen>now()-interval '15 seconds',false) AS online FROM devices WHERE id=$1 AND owner_id=$2 FOR UPDATE",[req.params.id,req.user.id]);
  if(!d.rowCount||!d.rows[0].online){await c.query('ROLLBACK');return res.status(409).json({error:'Dispositivo no disponible'});}
+ await expirePlc(c,req.params.id);
+ if(cmd.action==='pulse'){
+  const pending=await c.query("SELECT 1 FROM plc_jobs WHERE device_id=$1 AND state IN ('queued','delivered')",[req.params.id]);
+  if(pending.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Transferencia PLC pendiente'});}
+ }else await c.query("UPDATE plc_jobs SET state='cancelled',finished_at=now() WHERE device_id=$1 AND state='queued'",[req.params.id]);
  if(cmd.action==='pulse'&&d.rows[0].snapshot?.plc_locked===true){await c.query('ROLLBACK');return res.status(409).json({error:'Modo PLC activo: activación manual bloqueada. STOP con Apagar todos.'});}
  if(cmd.action==='pulse'&&cmd.ms>maxPulse(d.rows[0].snapshot)){await c.query('ROLLBACK');return res.status(409).json({error:'El firmware admite máximo '+maxPulse(d.rows[0].snapshot)/1000+' segundos. Actualízalo.'});}
  if(cmd.action==='pulse'&&cmd.ms===0&&d.rows[0].snapshot?.hold_supported!==true){await c.query('ROLLBACK');return res.status(409).json({error:'Actualiza el firmware para encendido continuo'});}
@@ -115,6 +122,8 @@ app.post('/api/device/poll',throttle('poll:',300,60000),asyncRoute(async(req,res
    if((hold&&!s.hold_supported)||(outgoing.action==='pulse'&&(outgoing.ms>maxPulse(s)||s.plc_locked))){await c.query("UPDATE commands SET state='rejected',finished_at=now() WHERE id=$1",[outgoing.id]);outgoing=null;}
    else {await c.query("UPDATE commands SET state='delivered',delivered_at=now() WHERE id=$1",[outgoing.id]);if(hold)outgoing={...outgoing,action:'on'};}
  }
+ if(!outgoing)outgoing=await pollPlc(c,d.id,s,ack);
+ else if(ack&&isUuid(ack.id)&&['executed','rejected'].includes(ack.state))await c.query("UPDATE plc_jobs SET state=CASE WHEN $1='executed' AND revision::text<>$4 THEN 'unknown' ELSE $1 END,finished_at=now() WHERE id=$2 AND device_id=$3 AND state='delivered'",[ack.state,ack.id,d.id,s.plc_revision||'']);
  await c.query('COMMIT');res.json({command:outgoing});
  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }));
@@ -122,6 +131,6 @@ app.post('/api/device/poll',throttle('poll:',300,60000),asyncRoute(async(req,res
 app.use('/plc',auth);
 app.use(express.static(fileURLToPath(new URL('../public/',import.meta.url)),{etag:false,maxAge:0}));
 app.use((err,req,res,next)=>{console.error('request failed',err.code||err.name);if(!res.headersSent)res.status(err.status===400?400:500).json({error:'Solicitud no completada'});});
-const cleanup=async()=>{try{await pool.query("DELETE FROM readings WHERE at<now()-interval '24 hours'");await pool.query("DELETE FROM sessions WHERE expires_at<=now()");await pool.query("UPDATE commands SET state='expired',finished_at=now() WHERE state='queued' AND expires_at<=now()");await pool.query("UPDATE commands SET state='unknown',finished_at=now() WHERE state='delivered' AND delivered_at<now()-interval '30 seconds'");await pool.query("DELETE FROM commands WHERE created_at<now()-interval '7 days'");}catch(e){console.error('cleanup failed',e.code||e.name);}};
+const cleanup=async()=>{try{await pool.query("DELETE FROM readings WHERE at<now()-interval '24 hours'");await pool.query("DELETE FROM sessions WHERE expires_at<=now()");await pool.query("UPDATE commands SET state='expired',finished_at=now() WHERE state='queued' AND expires_at<=now()");await pool.query("UPDATE commands SET state='unknown',finished_at=now() WHERE state='delivered' AND delivered_at<now()-interval '30 seconds'");await pool.query("DELETE FROM commands WHERE created_at<now()-interval '7 days'");await pool.query("DELETE FROM plc_jobs WHERE created_at<now()-interval '7 days'");}catch(e){console.error('cleanup failed',e.code||e.name);}};
 setInterval(cleanup,60000).unref();
 app.listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Yarumo IoT listening'));
