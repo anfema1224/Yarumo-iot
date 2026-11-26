@@ -62,3 +62,61 @@ di.forEach((_,i)=>$('di').append(button('DI'+(i+1)+' LOW',()=>{di[i]=!di[i];pain
 ai.forEach((_,i)=>{const l=el('label','AI'+(i+1)+' '),v=el('span','0'),r=el('input');r.type='range';r.min=0;r.max=4095;r.value=0;r.oninput=()=>{ai[i]=Number(r.value);v.textContent=r.value;};l.append(v,r);$('ai').append(l);});
 for(let i=0;i<4;i++)$('outputs').append(el('span','DO'+(i+1)+' OFF','lamp'));
 example();
+
+let remoteDevices=[],remoteBusy=false,remotePolling=false,remoteData=null;
+const remoteMessage=s=>$('remoteMsg').textContent=s;
+async function request(path,body){
+ const opts={cache:'no-store',signal:AbortSignal.timeout(8000)};
+ if(body!==undefined){opts.method='POST';opts.headers={'Content-Type':'application/json','X-Yarumo-UI':'1'};opts.body=JSON.stringify(body);}
+ const r=await fetch(path,opts);const data=await r.json().catch(()=>({}));
+ if(!r.ok)throw Error(data.error||'HTTP '+r.status);
+ return data;
+}
+function target(){return remoteDevices.find(d=>d.id===$('target').value);}
+function route(id){return '/api/devices/'+encodeURIComponent(id)+'/plc';}
+function sameGraph(a,b){
+ try{
+  const normalize=g=>JSON.stringify({schema:1,nodes:g.nodes.map(n=>{const x={id:n.id,op:n.op,x:n.x,y:n.y};if(OPS[n.op].param)x.p=n.p;if(OPS[n.op].analog)x.channel=n.channel;return x;}),edges:g.edges.map(e=>({from:e.from,to:e.to,port:e.port}))});
+  return normalize(a)===normalize(b);
+ }catch{return false;}
+}
+function paintRemote(){
+ const d=target(),s=d?.snapshot,p=remoteData?.saved,j=remoteData?.jobs?.[0];
+ const compatible=s?.plc_transfer===true;
+ const ready=compatible&&d?.online&&s.plc_mode==='STOP'&&!s.plc_simulation&&s.relay_cmd?.every(v=>v===0);
+ $('remoteState').textContent=d?(d.online?'En línea':'Sin conexión')+' · FW '+(s?.version||'—')+' · PLC '+(s?.plc_mode||'—')+' · Guardado: '+(p?.revision||'ninguno')+' · Instalado: '+(s?.plc_revision||'sin revisión')+' · Última transferencia: '+(j?.state||'—')+(compatible?'':' · Requiere firmware 0.5'):'Sin dispositivos vinculados';
+ $('target').disabled=remoteBusy;$('reloadRemote').disabled=remoteBusy;
+ $('loadRemote').disabled=remoteBusy||!p||!editing();
+ $('saveRemote').disabled=remoteBusy||!d||!editing();
+ $('transferRemote').disabled=remoteBusy||!ready||!p||!editing();
+ $('stopRemote').disabled=remoteBusy||!d?.online;
+}
+async function loadState(){
+ if(remoteBusy||remotePolling)return;remotePolling=true;
+ try{
+  const selected=$('target').value;remoteDevices=await request('/api/devices');
+  $('target').replaceChildren(...remoteDevices.map(d=>{const o=el('option',d.name+' · '+d.hardware_id);o.value=d.id;return o;}));
+  if(remoteDevices.some(d=>d.id===selected))$('target').value=selected;
+  const id=$('target').value;remoteData=null;if(id){const result=await request(route(id));if($('target').value===id)remoteData=result;}
+ }catch(e){remoteData=null;remoteMessage('No se pudo consultar: '+e.message);}
+ finally{remotePolling=false;paintRemote();}
+}
+async function remoteAction(action){
+ if(remoteBusy||remotePolling)return;const d=target();if(!d)return;
+ if(action!=='stop'&&!editing())return remoteMessage('Detén primero la simulación virtual.');
+ if(action==='load'){if(!remoteData?.saved)return;if(!confirm('¿Reemplazar el diagrama actual por el programa guardado?'))return;graph=structuredClone(remoteData.saved.graph);seq=0;selected=source=compiled=sim=null;redraw();return remoteMessage('Programa abierto.');}
+ if(action==='save'&&!check())return;
+ if(action==='transfer'){
+  if(!remoteData?.saved||!sameGraph(graph,remoteData.saved.graph))return remoteMessage('Guarda primero los cambios del diagrama.');
+  if(!confirm('¿Instalar esta revisión en '+d.name+'? El PLC debe estar en STOP y todas las salidas apagadas.'))return;
+ }
+ remoteBusy=true;paintRemote();
+ try{
+  if(action==='save'){const r=await request(route(d.id)+'/save',{graph});remoteMessage('Guardado: '+r.revision);}
+  if(action==='transfer'){const r=await request(route(d.id)+'/transfer',{revision:remoteData.saved.revision});remoteMessage('Transferencia en cola: '+r.id+' · consulta la confirmación y revisión instalada.');}
+  if(action==='stop'){const r=await request('/api/devices/'+encodeURIComponent(d.id)+'/commands',{action:'all',relay:0,ms:0});remoteMessage('STOP físico en cola: '+r.id+' · verifica que las salidas se apaguen.');}
+ }catch(e){remoteMessage(e.message);}finally{remoteBusy=false;await loadState();}
+}
+$('target').onchange=()=>{remoteData=null;paintRemote();loadState();};
+$('reloadRemote').onclick=loadState;$('loadRemote').onclick=()=>remoteAction('load');$('saveRemote').onclick=()=>remoteAction('save');$('transferRemote').onclick=()=>remoteAction('transfer');$('stopRemote').onclick=()=>remoteAction('stop');
+paintRemote();loadState();setInterval(()=>{paintRemote();loadState();},3000);
