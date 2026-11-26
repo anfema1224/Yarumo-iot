@@ -6,7 +6,7 @@ export function snapshot(s, hardwareId) {
  if(!s || s.device!==hardwareId || typeof s.version!=='string' || !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s.version)
  || !ints(s.di,6,0,1)||!ints(s.ai_raw,4,0,4095)||!ints(s.ai_mv,4,0,5000)||!ints(s.relay_cmd,4,0,1)
  ||!ints(s.remaining_ms,4,0,maxPulse(s))) return null;
- return {device:s.device,version:s.version,di:s.di,ai_raw:s.ai_raw,ai_mv:s.ai_mv,relay_cmd:s.relay_cmd,remaining_ms:s.remaining_ms,hold_supported:s.hold_supported===true,max_pulse_ms:maxPulse(s)};
+ return {device:s.device,version:s.version,di:s.di,ai_raw:s.ai_raw,ai_mv:s.ai_mv,relay_cmd:s.relay_cmd,remaining_ms:s.remaining_ms,hold_supported:s.hold_supported===true,max_pulse_ms:maxPulse(s),plc_locked:s.plc_locked===true||s.simulation_lock===true};
 }
 export function command(body){
  if(!body||typeof body!=='object') return null;
