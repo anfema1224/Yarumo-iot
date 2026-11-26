@@ -63,7 +63,7 @@ ai.forEach((_,i)=>{const l=el('label','AI'+(i+1)+' '),v=el('span','0'),r=el('inp
 for(let i=0;i<4;i++)$('outputs').append(el('span','DO'+(i+1)+' OFF','lamp'));
 example();
 
-let remoteDevices=[],remoteBusy=false,remotePolling=false,remoteData=null;
+let remoteDevices=[],remoteBusy=false,remotePolling=false,remoteData=null,stopBusy=false,stopOrder=null;
 const remoteMessage=s=>$('remoteMsg').textContent=s;
 async function request(path,body){
  const opts={cache:'no-store',signal:AbortSignal.timeout(8000)};
@@ -83,13 +83,17 @@ function sameGraph(a,b){
 function paintRemote(){
  const d=target(),s=d?.snapshot,p=remoteData?.saved,j=remoteData?.jobs?.[0];
  const compatible=s?.plc_transfer===true;
+ const matches=!!p&&s?.plc_revision===p.revision;
+ const pending=!!remoteData?.jobs?.some(k=>['queued','delivered'].includes(k.state));
  const ready=compatible&&d?.online&&s.plc_mode==='STOP'&&!s.plc_simulation&&s.relay_cmd?.every(v=>v===0);
- $('remoteState').textContent=d?(d.online?'En línea':'Sin conexión')+' · FW '+(s?.version||'—')+' · PLC '+(s?.plc_mode||'—')+' · Guardado: '+(p?.revision||'ninguno')+' · Instalado: '+(s?.plc_revision||'sin revisión')+' · Última transferencia: '+(j?.state||'—')+(compatible?'':' · Requiere firmware 0.5'):'Sin dispositivos vinculados';
+ $('remoteState').textContent=d?(d.online?'En línea':'Sin conexión')+' · FW '+(s?.version||'—')+' · PLC '+(s?.plc_mode||'—')+' · Guardado: '+(p?.revision||'ninguno')+' · Instalado: '+(s?.plc_revision||'sin revisión')+' · Arranque: '+(s?.plc_control?(s.plc_auto?'Automático':'Manual'):'requiere V0.5.1')+' · Última orden: '+(j?j.kind+' / '+j.state:'—')+(compatible?'':' · Requiere firmware 0.5'):'Sin dispositivos vinculados';
  $('target').disabled=remoteBusy;$('reloadRemote').disabled=remoteBusy;
  $('loadRemote').disabled=remoteBusy||!p||!editing();
  $('saveRemote').disabled=remoteBusy||!d||!editing();
  $('transferRemote').disabled=remoteBusy||!ready||!p||!editing();
- $('stopRemote').disabled=remoteBusy||!d?.online;
+ $('runRemote').disabled=remoteBusy||remotePolling||!ready||!matches||pending||!s?.plc_control||!editing();
+ $('applyBoot').disabled=$('runRemote').disabled;$('bootPolicy').disabled=$('runRemote').disabled;
+ $('stopRemote').disabled=!d?.online||stopBusy;
 }
 async function loadState(){
  if(remoteBusy||remotePolling)return;remotePolling=true;
@@ -102,10 +106,17 @@ async function loadState(){
  finally{remotePolling=false;paintRemote();}
 }
 async function remoteAction(action){
- if(remoteBusy)return;if(remotePolling&&action!=='stop')return remoteMessage('Actualizando estado, vuelve a pulsar.');const d=target();if(!d)return;
+ if(action==='stop')return stopRemote();
+ if(remoteBusy||stopBusy)return;if(remotePolling&&action!=='stop')return remoteMessage('Actualizando estado, vuelve a pulsar.');const d=target();if(!d)return;
  if(action!=='stop'&&!editing())return remoteMessage('Detén primero la simulación virtual.');
  if(action==='load'){if(!remoteData?.saved)return;if(!confirm('¿Reemplazar el diagrama actual por el programa guardado?'))return;graph=structuredClone(remoteData.saved.graph);seq=0;selected=source=compiled=sim=null;redraw();return remoteMessage('Programa abierto.');}
  if(action==='save'&&!check())return;
+ if(action==='run'||action==='boot'){
+  const s=d.snapshot,p=remoteData?.saved;
+  if(!p||!sameGraph(graph,p.graph)||s?.plc_revision!==p.revision)return remoteMessage('Abre o guarda e instala la revisión correcta antes del control físico.');
+  if(action==='run'&&!confirm('¿Autoriza RUN físico en '+d.name+'? Confirma banco sin cargas. El programa puede activar relés reales.'))return;
+  if(action==='boot'&&$('bootPolicy').value==='auto'&&!confirm('¿Autoriza arranque automático al conectar alimentación para esta revisión? Puede activar relés sin intervención. Solo banco sin cargas.'))return;
+ }
  if(action==='transfer'){
   if(!remoteData?.saved||!sameGraph(graph,remoteData.saved.graph))return remoteMessage('Guarda primero los cambios del diagrama.');
   if(!confirm('¿Instalar esta revisión en '+d.name+'? El PLC debe estar en STOP y todas las salidas apagadas.'))return;
@@ -114,9 +125,16 @@ async function remoteAction(action){
  try{
   if(action==='save'){const r=await request(route(d.id)+'/save',{graph});remoteMessage('Guardado: '+r.revision);}
   if(action==='transfer'){const r=await request(route(d.id)+'/transfer',{revision:remoteData.saved.revision});remoteMessage('Transferencia en cola: '+r.id+' · consulta la confirmación y revisión instalada.');}
-  if(action==='stop'){const r=await request('/api/devices/'+encodeURIComponent(d.id)+'/commands',{action:'all',relay:0,ms:0});remoteMessage('STOP físico en cola: '+r.id+' · verifica que las salidas se apaguen.');}
+  if(action==='run'||action==='boot'){const r=await request(route(d.id)+'/control',{kind:action,revision:remoteData.saved.revision,epoch:d.snapshot.plc_epoch,...(action==='boot'?{auto:$('bootPolicy').value==='auto'}:{})});remoteMessage('Orden '+action+' en cola: '+r.id+' · espera confirmación.');}
  }catch(e){remoteMessage(e.message);}finally{remoteBusy=false;await loadState();}
 }
+async function stopRemote(){
+ const d=target();if(!d||stopBusy)return;stopBusy=true;paintRemote();
+ try{
+  const r=await request('/api/devices/'+encodeURIComponent(d.id)+'/commands',{action:'all',relay:0,ms:0});
+  stopOrder={id:r.id,device:d.id};remoteMessage('STOP físico en cola: '+r.id+' · no es un paro de emergencia.');
+ }catch(e){remoteMessage('STOP no confirmado: '+e.message);}finally{stopBusy=false;paintRemote();loadState();}
+}
 $('target').onchange=()=>{remoteData=null;paintRemote();loadState();};
-$('reloadRemote').onclick=loadState;$('loadRemote').onclick=()=>remoteAction('load');$('saveRemote').onclick=()=>remoteAction('save');$('transferRemote').onclick=()=>remoteAction('transfer');$('stopRemote').onclick=()=>remoteAction('stop');
+$('reloadRemote').onclick=loadState;$('loadRemote').onclick=()=>remoteAction('load');$('saveRemote').onclick=()=>remoteAction('save');$('transferRemote').onclick=()=>remoteAction('transfer');$('stopRemote').onclick=stopRemote;$('runRemote').onclick=()=>remoteAction('run');$('applyBoot').onclick=()=>remoteAction('boot');
 paintRemote();loadState();setInterval(()=>{paintRemote();loadState();},3000);
