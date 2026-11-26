@@ -43,7 +43,7 @@ export function compileGraph(graph){
   const ports=incoming.get(n.id);
   const a=n.op==='DI'?n.p-1:OPS[n.op].analog?n.channel-1:(ports.has(0)?index.get(ports.get(0)):0);
   const b=ports.has(1)?index.get(ports.get(1)):0;
-  return {op:n.op,a,b,p:n.op==='DI'?0:(n.p??0)};
+  return {op:n.op,a,b,p:n.op==='DI'||!OPS[n.op].param?0:n.p};
  });
  const output=[-1,-1,-1,-1];for(const n of graph.nodes)if(n.op==='DO')output[n.p-1]=index.get(incoming.get(n.id).get(0));
  return {schema:1,count:nodes.length,nodes,output,order:ordered.map(n=>n.id)};
