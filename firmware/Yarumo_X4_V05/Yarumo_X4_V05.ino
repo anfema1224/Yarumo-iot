@@ -549,7 +549,7 @@ void webPhysical(){
   if(!webAuth())return;
   if(web.header("X-Yarumo-Control")!="1"){web.send(403,"text/plain","Missing control header");return;}
   String action=web.arg("action");bool ok=false;
-  if(action=="stop"){allOff();ok=true;}
+  if(action=="stop"){allOff();if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);plcWatchFault=false;xSemaphoreGive(relayLock);}ok=true;}
   else if(action=="install"){JsonDocument d;if(!deserializeJson(d,web.arg("program"))){d.remove("revision");String raw;serializeJson(d,raw);ok=installPhysical(raw);}}
   else if(action=="run")ok=armPhysical();
   if(!ok){web.send(409,"text/plain","Programa invalido o modo no disponible; STOP antes de instalar.");return;}
@@ -625,7 +625,7 @@ void cloudTask(void*) {
                 pending={};
                 JsonObjectConst cmd=reply["command"].as<JsonObjectConst>();
                 if(!cmd.isNull()){
-                  static CloudOrder o; o={}; const char* id=cmd["id"]|"";
+                  static CloudOrder o; memset(&o,0,sizeof(o)); const char* id=cmd["id"]|"";
                   const char* action=cmd["action"]|"";
                   uint32_t ttl=cmd["ttl_ms"]|0U,ms=cmd["ms"]|0U;
                   int relay=cmd["relay"]|-1;
@@ -672,7 +672,7 @@ void tickCloud() {
   if(xQueueReceive(orderQueue,&o,0)==pdTRUE){
     bool ok=false;
     if(!updating&&WiFi.status()==WL_CONNECTED&&o.ttl>0&&millis()-o.start<o.ttl){
-      if(!strcmp(o.action,"all")){allOff();ok=true;}
+      if(!strcmp(o.action,"all")){allOff();if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);plcWatchFault=false;xSemaphoreGive(relayLock);}ok=true;}
       else if(!strcmp(o.action,"plcset")&&!simulationLock&&!physicalRunning()){
         bool clear=true;if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);for(bool v:relayOn)if(v)clear=false;xSemaphoreGive(relayLock);}else clear=false;
         if(clear&&o.program[0])ok=installPhysical(String(o.program));
