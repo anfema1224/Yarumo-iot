@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {command,snapshot,isUuid} from './validation.mjs';
+test('pulsos acotados y apagado',()=>{assert.deepEqual(command({action:'pulse',relay:1,ms:50}),{action:'pulse',relay:1,ms:50}); for(const x of [0,49,10001,1.1,'2000',null])assert.equal(command({action:'pulse',relay:1,ms:x}),null);assert.equal(command({action:'pulse',relay:5,ms:100}),null);assert.deepEqual(command({action:'all'}),{action:'all',relay:0,ms:0});});
+test('telemetría y hardware correctos',()=>{const x={device:'AABBCCDDEEFF',version:'0.3.0',di:[1,1,0,0,0,1],ai_raw:[0,0,4095,0],ai_mv:[0,10,3000,0],relay_cmd:[0,0,0,0],remaining_ms:[0,0,0,0]};assert.ok(snapshot(x,x.device));assert.equal(snapshot(x,'other'),null);assert.equal(snapshot({...x,ai_raw:[0,0,4096,0]},x.device),null);assert.equal(snapshot({...x,relay_cmd:[0,1]},x.device),null);});
+test('identificador UUID',()=>{assert.ok(isUuid('12345678-1234-1234-1234-123456789abc'));assert.equal(isUuid('bad'),false);});
