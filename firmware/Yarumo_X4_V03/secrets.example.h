@@ -8,7 +8,7 @@
 #define YARUMO_WIFI_PASS "TU_CLAVE_WIFI"
 #define YARUMO_OTA_PASS "TU_CLAVE_OTA"
 #define YARUMO_WEB_PASS "TU_CLAVE_WEB"
-// Token del dispositivo y CA raíz verificada. Vacíos = nube deshabilitada.
+// Token vacío = nube deshabilitada. CA vacía = raíces públicas incluidas en firmware V0.3.2.
 #define YARUMO_CLOUD_TOKEN ""
 #define YARUMO_CLOUD_CA ""
 // Para una CA PEM usar: #define YARUMO_CLOUD_CA R"PEM(...certificado...)PEM"
