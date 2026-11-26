@@ -5,6 +5,7 @@
  * Probar con contactos de rele sin cargas. DI/AI maximo 3.3 V.
  */
 #include <Arduino.h>
+#include <esp_system.h>
 #include "YarumoPlc.h"
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -35,7 +36,7 @@
 #define YARUMO_REPLACE_CONFIG 0
 #endif
 
-constexpr char VERSION[] = "0.5.0";
+constexpr char VERSION[] = "0.5.1";
 char WIFI_SSID[33] = {};
 char WIFI_PASS[65] = {};
 char OTA_PASS[129] = {};
@@ -77,6 +78,9 @@ bool configReady = false;
 bool simulationLock=false;
 bool physicalLock=false, physicalInstalled=false;
 char plcRevision[37]={};
+char plcEpoch[17]={};
+bool autoBoot=false,bootPolicyOK=true;
+void rotateEpoch(){snprintf(plcEpoch,sizeof(plcEpoch),"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random());}
 yarumo::Engine plcPhysical;
 // PLC ownership and heartbeat are protected by relayLock. Only loop task calls the engine.
 bool plcActive=false, plcWatchFault=false;
@@ -197,10 +201,11 @@ void offLocked(uint8_t i) {
   pulseEnd[i] = 0;
   relayTimed[i] = false; cloudHold[i] = false;
 }
+void explicitStop();
 void offRelay(uint8_t i) {
+  if(physicalLock){explicitStop();return;}
   if (relayLock) xSemaphoreTake(relayLock, portMAX_DELAY);
-  if(physicalLock){plcActive=false;plcPhysical.stop();for(uint8_t j=0;j<4;j++)offLocked(j);}
-  else offLocked(i);
+  offLocked(i);
   if (relayLock) xSemaphoreGive(relayLock);
 }
 void allOff() {
@@ -208,6 +213,17 @@ void allOff() {
   plcActive=false;plcPhysical.stop();
   for (uint8_t i = 0; i < 4; ++i) offLocked(i);
   if (relayLock) xSemaphoreGive(relayLock);
+}
+// Any operator STOP revokes automatic startup; install and OTA also revoke it.
+bool clearAutoBoot(){
+ autoBoot=false;
+ if(!nvsOK){bootPolicyOK=false;return false;}
+ if(prefs.isKey("plc_auto")&&!prefs.remove("plc_auto")){bootPolicyOK=false;return false;}
+ bootPolicyOK=!prefs.isKey("plc_auto");return bootPolicyOK;
+}
+void explicitStop(){
+ allOff();rotateEpoch();clearAutoBoot();
+ if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);plcWatchFault=false;xSemaphoreGive(relayLock);}
 }
 bool cloudFresh() { const uint32_t t=lastCloudOK.load(); return uint32_t(millis()-t)<CLOUD_LOSS_MS; }
 bool startPulse(uint8_t i, uint32_t ms, bool remote) {
@@ -303,7 +319,7 @@ void command(char* input) {
   if (!strcmp(cmd, "HELP") && !a) { help(); return; }
   if (!strcmp(cmd, "STATUS") && !a) { report(); return; }
   if (!strcmp(cmd, "ALL") && a && !strcmp(a, "OFF") && !b) {
-    allOff(); Serial.println("OK ALL OFF"); return;
+    explicitStop(); Serial.println("OK ALL OFF"); return;
   }
   if (!strcmp(cmd, "OFF") && !b && parseUInt(a, i) && i >= 1 && i <= 4) {
     offRelay(i - 1); Serial.println("OK OFF"); return;
@@ -337,7 +353,7 @@ void readSerial() {
 
 const char PAGE[] PROGMEM = R"YARUMOHTML(<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Yarumo IoT X4</title><style>
 *{box-sizing:border-box}body{margin:0;background:#eef3f7;color:#152b3c;font:16px system-ui,sans-serif}header{background:#153d55;color:white;padding:20px}main{max-width:900px;margin:auto;padding:16px}h1{margin:0;font-size:25px}h2{font-size:19px}p{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.card{background:white;border:1px solid #d5e0e9;border-radius:12px;padding:14px}.val{font-size:24px;font-weight:bold;margin:8px 0}.muted{color:#526879;font-size:13px}button,input{font:inherit;padding:10px;border-radius:7px}button{border:0;background:#176b80;color:white;cursor:pointer;margin:4px 0}button:disabled{opacity:.45}button.off{background:#933e3e}input{width:100%;border:1px solid #aebfcb}.status{padding:10px;background:white;border-radius:8px;min-height:42px}.on{color:#077346}.idle{color:#526879}footer{font-size:13px;margin:20px 0;color:#526879}
-</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.5.0 · Panel local</p></header><main>
+</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.5.1 · Panel local</p></header><main>
 <p id="status" class="status" role="status">Conectando...</p><p id="info" class="muted"></p>
 <h2>Entradas digitales</h2><div id="di" class="grid"></div>
 <h2>Entradas analógicas</h2><div id="ai" class="grid"></div>
@@ -384,7 +400,8 @@ String statusJson() {
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=on[i]?'1':'0'; }
   j += "],\"simulation_lock\":"; j += simulationLock?"true":"false";
   j += ",\"plc_locked\":"; j += physicalLock?"true":"false";
-  j += ",\"plc_transfer\":true,\"plc_revision\":\"";j+=plcRevision;j+="\",\"plc_mode\":\"";
+  j += ",\"plc_transfer\":true,\"plc_control\":true,\"plc_epoch\":\"";j+=plcEpoch;j+="\",\"plc_auto\":";j+=autoBoot?"true":"false";
+  j += ",\"plc_revision\":\"";j+=plcRevision;j+="\",\"plc_mode\":\"";
   bool active=false,fault=false;if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);active=plcActive;fault=plcWatchFault;xSemaphoreGive(relayLock);}
   j+=fault?"FAULT":active?"RUN":"STOP";j+="\"";
   j += ",\"hold_supported\":true,\"max_pulse_ms\":"; j += String(MAX_PULSE_MS);
@@ -397,7 +414,7 @@ void webRelay() {
   // A custom header is required for all mutations; no CORS is enabled.
   if (web.header("X-Yarumo-Control") != "1") { web.send(403,"text/plain","Missing control header"); return; }
   String action=web.arg("action");
-  if (action=="all") { allOff(); web.send(200,"text/plain","OK"); return; }
+  if (action=="all") { explicitStop(); web.send(200,"text/plain","OK"); return; }
   uint32_t n,ms;
   if (!parseUInt(web.arg("n").c_str(),n)||n<1||n>4) { web.send(400,"text/plain","Invalid relay"); return; }
   if (action=="off") { offRelay(n-1); web.send(200,"text/plain","OK"); return; }
@@ -431,7 +448,7 @@ String simJson(){
 void simStop(){plcSim.stop();simInputs=yarumo::Inputs{};simPreset=0;}
 void simRun(uint8_t preset){
   // Must only be called on the loop task: physical activation also runs on that task.
-  simulationLock=true;allOff();simStop();
+  simulationLock=true;explicitStop();simStop();
   yarumo::Program p;
   p.count=3;p.nodes[0]={yarumo::Op::DI,0,0,0};p.nodes[1]={yarumo::Op::DI,1,0,0};
   if(preset==1)p.nodes[2]={yarumo::Op::TON,0,0,2000};
@@ -459,7 +476,7 @@ void webSim(){
 }
 
 
-const char PHYS_PAGE[] PROGMEM=R"PHYSHTML(<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PLC físico · Yarumo</title><style>body{font:16px system-ui;max-width:800px;margin:20px auto;padding:0 16px;background:#eef3f7;color:#183d55}section{background:white;padding:16px;border-radius:8px;margin:12px 0}button,input{font:inherit;padding:10px;margin:4px}button:disabled{opacity:.4}#stop{background:#a33;color:white}.warn{background:#fff3d7;padding:10px}pre{white-space:pre-wrap}</style><h1>Yarumo PLC · control físico experimental</h1><p><a href="/">Panel local</a></p><p class="warn">Solo banco de pruebas sin cargas. Las salidas son relés REALES. DI usa nivel GPIO crudo (HIGH en reposo con pull-up). No conectar tensiones externas. STOP no sustituye un paro de emergencia cableado.</p><section><label>Programa JSON exportado del editor FBD <input id="file" type="file" accept=".json,application/json"></label><button id="install">Instalar en STOP</button><button id="run">RUN físico</button><button id="stop">STOP / todos OFF</button><p>El modo manual queda bloqueado hasta reiniciar. El programa se conserva en memoria NVS, pero siempre inicia en STOP. Sin Wi-Fi, el PLC continúa; para detenerlo sin red usa desconexión segura de alimentación.</p><p id="msg" role="status"></p></section><section><h2>Estado del PLC</h2><pre id="state">Conectando…</pre></section><script>
+const char PHYS_PAGE[] PROGMEM=R"PHYSHTML(<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PLC físico · Yarumo</title><style>body{font:16px system-ui;max-width:800px;margin:20px auto;padding:0 16px;background:#eef3f7;color:#183d55}section{background:white;padding:16px;border-radius:8px;margin:12px 0}button,input{font:inherit;padding:10px;margin:4px}button:disabled{opacity:.4}#stop{background:#a33;color:white}.warn{background:#fff3d7;padding:10px}pre{white-space:pre-wrap}</style><h1>Yarumo PLC · control físico experimental</h1><p><a href="/">Panel local</a></p><p class="warn">Solo banco de pruebas sin cargas. Las salidas son relés REALES. DI usa nivel GPIO crudo (HIGH en reposo con pull-up). No conectar tensiones externas. STOP no sustituye un paro de emergencia cableado.</p><section><label>Programa JSON exportado del editor FBD <input id="file" type="file" accept=".json,application/json"></label><button id="install">Instalar en STOP</button><button id="run">RUN físico</button><button id="stop">STOP / todos OFF</button><p>El modo manual queda bloqueado hasta reiniciar. El programa se conserva en NVS. Arranque manual por defecto; la opción automática requiere autorización explícita desde la nube. STOP revoca esa autorización. Sin Wi-Fi, el PLC continúa; para detenerlo sin red usa desconexión segura de alimentación.</p><p id="msg" role="status"></p></section><section><h2>Estado del PLC</h2><pre id="state">Conectando…</pre></section><script>
 const $=id=>document.getElementById(id);let busy=false,s=null;
 function render(){if(!s)return;$('state').textContent='Modo: '+s.mode+' · Programa: '+(s.installed?'instalado':'ninguno')+'\nDI: '+s.di.join('  ')+'\nAI: '+s.ai.join('  ')+'\nDO: '+s.out.join('  ')+'\nFallo de ciclo: '+(s.fault?'sí':'no');$('run').disabled=busy||!s.installed||s.mode==='RUN'||s.simulation;$('install').disabled=busy||s.mode==='RUN'||s.simulation;$('stop').disabled=busy;}
 async function refresh(){if(busy)return;try{const r=await fetch('/api/plc-physical',{cache:'no-store',signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('HTTP '+r.status);s=await r.json();render();}catch(e){s=null;$('state').textContent='Sin comunicación. El PLC físico puede seguir ejecutándose.';$('run').disabled=$('install').disabled=true;}}
@@ -509,18 +526,36 @@ bool restorePhysical(){
 bool installPhysical(const String& raw){
   if(simulationLock||physicalRunning()||!nvsOK||!timerReady)return false;
   yarumo::Program p;if(!decodeProgram(raw,p))return false;
-  physicalLock=true;allOff();
+  physicalLock=true;explicitStop();if(!bootPolicyOK)return false;
   if(prefs.putString("plc_v1",raw)!=raw.length()||prefs.getString("plc_v1")!=raw){physicalInstalled=false;plcRevision[0]=0;return false;}
   physicalInstalled=plcPhysical.install(p);if(physicalInstalled)revisionFrom(raw);return physicalInstalled;
 }
 bool armPhysical(){
   if(simulationLock||!physicalInstalled||!timerReady||!relayLock||updating||physicalRunning())return false;
-  physicalLock=true;allOff();const uint32_t now=millis();
+  physicalLock=true;allOff();rotateEpoch();const uint32_t now=millis();
   if(!plcPhysical.arm(now))return false;
   xSemaphoreTake(relayLock,portMAX_DELAY);plcWatchFault=false;plcHeartbeat=now;plcActive=true;xSemaphoreGive(relayLock);return true;
 }
+bool physicalStoppedClear(){
+ if(!relayLock||!timerReady||simulationLock||!physicalInstalled||updating)return false;
+ xSemaphoreTake(relayLock,portMAX_DELAY);bool ok=!plcActive&&!plcWatchFault;
+ for(bool v:relayOn)if(v)ok=false;
+ xSemaphoreGive(relayLock);return ok;
+}
+bool setAutoBoot(bool enable){
+ if(!physicalStoppedClear()||!revisionValid(plcRevision)||!nvsOK)return false;
+ if(!enable){bool ok=clearAutoBoot();rotateEpoch();return ok;}
+ // Persist only the exact installed revision, not a general enable flag.
+ if(prefs.putString("plc_auto",plcRevision)!=strlen(plcRevision)||prefs.getString("plc_auto")!=plcRevision){clearAutoBoot();return false;}
+ autoBoot=true;bootPolicyOK=true;rotateEpoch();return true;
+}
 void tickPhysical(){
-  if(!physicalRunning())return;
+  if(!physicalRunning()){
+    // Watchdog fault revokes boot policy on the loop task, never on the timer task.
+    bool fault=false;if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);fault=plcWatchFault;xSemaphoreGive(relayLock);}
+    if(fault&&autoBoot){clearAutoBoot();rotateEpoch();}
+    return;
+  }
   const uint32_t now=millis();
   xSemaphoreTake(relayLock,portMAX_DELAY);uint32_t prev=plcHeartbeat;xSemaphoreGive(relayLock);
   if(uint32_t(now-prev)<20)return;
@@ -539,7 +574,7 @@ void tickPhysical(){
 String physicalJson(){
   JsonDocument d;bool active=false,fault=false;bool on[4]={};
   if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);active=plcActive;fault=plcWatchFault;for(uint8_t i=0;i<4;i++)on[i]=relayOn[i];xSemaphoreGive(relayLock);}
-  d["mode"]=fault?"FAULT":active?"RUN":"STOP";d["fault"]=fault;d["installed"]=physicalInstalled;d["simulation"]=simulationLock;d["revision"]=plcRevision;
+  d["mode"]=fault?"FAULT":active?"RUN":"STOP";d["fault"]=fault;d["installed"]=physicalInstalled;d["simulation"]=simulationLock;d["revision"]=plcRevision;d["auto"]=autoBoot;
   JsonArray di=d["di"].to<JsonArray>();for(uint8_t p:DI)di.add(digitalRead(p));
   JsonArray ai=d["ai"].to<JsonArray>();for(uint8_t p:AI)ai.add(analogRead(p));
   JsonArray out=d["out"].to<JsonArray>();for(bool q:on)out.add(q?1:0);
@@ -549,7 +584,7 @@ void webPhysical(){
   if(!webAuth())return;
   if(web.header("X-Yarumo-Control")!="1"){web.send(403,"text/plain","Missing control header");return;}
   String action=web.arg("action");bool ok=false;
-  if(action=="stop"){allOff();if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);plcWatchFault=false;xSemaphoreGive(relayLock);}ok=true;}
+  if(action=="stop"){explicitStop();ok=bootPolicyOK;}
   else if(action=="install"){JsonDocument d;if(!deserializeJson(d,web.arg("program"))){d.remove("revision");String raw;serializeJson(d,raw);ok=installPhysical(raw);}}
   else if(action=="run")ok=armPhysical();
   if(!ok){web.send(409,"text/plain","Programa invalido o modo no disponible; STOP antes de instalar.");return;}
@@ -575,7 +610,7 @@ void configureWeb() {
 
 
 struct CloudSample { char json[1024]; };
-struct CloudOrder { char id[37]; char action[8]; uint8_t relay; uint32_t ms; uint32_t start; uint32_t ttl; char program[4096]; };
+struct CloudOrder { char id[37]; char action[8]; uint8_t relay; uint32_t ms; uint32_t start; uint32_t ttl; char program[4096]; char revision[37]; char epoch[17]; bool autoStart; };
 struct CloudAck { char id[37]; bool executed; };
 QueueHandle_t sampleQueue=nullptr, orderQueue=nullptr, ackQueue=nullptr;
 std::atomic<bool> cloudPaused{false};
@@ -633,6 +668,11 @@ void cloudTask(void*) {
                     strlcpy(o.id,id,sizeof(o.id));strlcpy(o.action,action,sizeof(o.action));
                     o.relay=(relay>=0&&relay<=4)?relay:255;o.ms=ms;
                     o.start=started;o.ttl=ttl<=10000?ttl:0;
+                    if(!strcmp(action,"plcrun")||!strcmp(action,"plcboot")){
+                      const char* rev=cmd["revision"]|"",*epoch=cmd["epoch"]|"";
+                      if(!revisionValid(rev)||strlen(epoch)!=16||(!strcmp(action,"plcboot")&&!cmd["auto"].is<bool>()))o.ttl=0;
+                      else{strlcpy(o.revision,rev,sizeof(o.revision));strlcpy(o.epoch,epoch,sizeof(o.epoch));o.autoStart=cmd["auto"]|false;}
+                    }
                     if(!strcmp(action,"plcset")){
                       const char* rev=cmd["revision"]|"";
                       JsonDocument transfer;transfer.set(cmd["program"]);transfer["revision"]=rev;
@@ -672,7 +712,10 @@ void tickCloud() {
   if(xQueueReceive(orderQueue,&o,0)==pdTRUE){
     bool ok=false;
     if(!updating&&WiFi.status()==WL_CONNECTED&&o.ttl>0&&millis()-o.start<o.ttl){
-      if(!strcmp(o.action,"all")){allOff();if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);plcWatchFault=false;xSemaphoreGive(relayLock);}ok=true;}
+      if(!strcmp(o.action,"all")){explicitStop();ok=bootPolicyOK;}
+      else if((!strcmp(o.action,"plcrun")||!strcmp(o.action,"plcboot"))&&physicalStoppedClear()&&!strcmp(o.revision,plcRevision)&&!strcmp(o.epoch,plcEpoch)){
+        ok=!strcmp(o.action,"plcrun")?armPhysical():setAutoBoot(o.autoStart);
+      }
       else if(!strcmp(o.action,"plcset")&&!simulationLock&&!physicalRunning()){
         bool clear=true;if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);for(bool v:relayOn)if(v)clear=false;xSemaphoreGive(relayLock);}else clear=false;
         if(clear&&o.program[0])ok=installPhysical(String(o.program));
@@ -755,10 +798,17 @@ void setup() {
     help();
     return;
   }
-  if(restorePhysical())Serial.println("PLC: program restored in STOP; manual mode available until explicit RUN");
+  rotateEpoch();
+  if(restorePhysical()){
+    Serial.println("PLC: program restored in STOP");
+    autoBoot=revisionValid(plcRevision)&&prefs.getString("plc_auto")==plcRevision;
+    // Only a cold power-on can auto-arm. Never resume after software reset, OTA, watchdog or brownout.
+    if(autoBoot&&esp_reset_reason()==ESP_RST_POWERON&&timerReady){if(!armPhysical())clearAutoBoot();}
+    else if(autoBoot)clearAutoBoot();
+  }else clearAutoBoot();
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.setPassword(OTA_PASS);
-  ArduinoOTA.onStart([]() { updating = true; cloudPaused.store(true); simStop(); allOff(); });
+  ArduinoOTA.onStart([]() { updating = true; cloudPaused.store(true); simStop(); explicitStop(); });
   ArduinoOTA.onEnd([]() { allOff(); });
   ArduinoOTA.onError([](ota_error_t e) {
     allOff(); updating = false; cloudPaused.store(false); Serial.printf("OTA error %u\n", (unsigned)e);
