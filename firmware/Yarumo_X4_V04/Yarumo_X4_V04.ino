@@ -35,7 +35,7 @@
 #define YARUMO_REPLACE_CONFIG 0
 #endif
 
-constexpr char VERSION[] = "0.4.0";
+constexpr char VERSION[] = "0.4.1";
 char WIFI_SSID[33] = {};
 char WIFI_PASS[65] = {};
 char OTA_PASS[129] = {};
@@ -75,6 +75,12 @@ bmF0774BxL4YSFlhgjICICadVGNA3jdgUM/I2O2dgq43mLyjj0xMqTQrbO/7lZsm
 bool configReady = false;
 // Simulation lock remains latched until reboot; no real output from the PLC.
 bool simulationLock=false;
+bool physicalLock=false, physicalInstalled=false;
+yarumo::Engine plcPhysical;
+// PLC ownership and heartbeat are protected by relayLock. Only loop task calls the engine.
+bool plcActive=false, plcWatchFault=false;
+uint32_t plcHeartbeat=0;
+constexpr uint32_t PLC_WATCH_MS=250;
 yarumo::Engine plcSim;
 yarumo::Inputs simInputs;
 uint32_t simLastScan=0;
@@ -192,17 +198,19 @@ void offLocked(uint8_t i) {
 }
 void offRelay(uint8_t i) {
   if (relayLock) xSemaphoreTake(relayLock, portMAX_DELAY);
-  offLocked(i);
+  if(physicalLock){plcActive=false;plcPhysical.stop();for(uint8_t j=0;j<4;j++)offLocked(j);}
+  else offLocked(i);
   if (relayLock) xSemaphoreGive(relayLock);
 }
 void allOff() {
   if (relayLock) xSemaphoreTake(relayLock, portMAX_DELAY);
+  plcActive=false;plcPhysical.stop();
   for (uint8_t i = 0; i < 4; ++i) offLocked(i);
   if (relayLock) xSemaphoreGive(relayLock);
 }
 bool cloudFresh() { const uint32_t t=lastCloudOK.load(); return uint32_t(millis()-t)<CLOUD_LOSS_MS; }
 bool startPulse(uint8_t i, uint32_t ms, bool remote) {
-  if (simulationLock || !timerReady || !relayLock || i >= 4 || ms < 50 ||
+  if (simulationLock || physicalLock || !timerReady || !relayLock || i >= 4 || ms < 50 ||
       ms > MAX_PULSE_MS || updating || WiFi.status() != WL_CONNECTED) return false;
   xSemaphoreTake(relayLock, portMAX_DELAY);
   // Do not extend a running pulse; turn it off first if needed.
@@ -215,7 +223,7 @@ bool startPulse(uint8_t i, uint32_t ms, bool remote) {
   return true;
 }
 bool startHold(uint8_t i,bool remote) {
-  if(simulationLock||!timerReady||!relayLock||i>=4||updating||WiFi.status()!=WL_CONNECTED) return false;
+  if(simulationLock||physicalLock||!timerReady||!relayLock||i>=4||updating||WiFi.status()!=WL_CONNECTED) return false;
   xSemaphoreTake(relayLock,portMAX_DELAY);
   if(relayOn[i] || WiFi.status()!=WL_CONNECTED ||
       (remote && !cloudFresh())){
@@ -231,7 +239,9 @@ void timerTask(void*) {
     const uint32_t cloudOK = lastCloudOK.load();
     const uint32_t now = millis();
     const bool connected = WiFi.status() == WL_CONNECTED;
-    for (uint8_t i = 0; i < 4; ++i)
+    if(plcActive){
+      if(uint32_t(now-plcHeartbeat)>PLC_WATCH_MS){plcActive=false;plcWatchFault=true;for(uint8_t i=0;i<4;i++)offLocked(i);}
+    }else for (uint8_t i = 0; i < 4; ++i)
       if (relayOn[i] && (!connected || (relayTimed[i] && (int32_t)(now - pulseEnd[i]) >= 0) || (cloudHold[i] && uint32_t(now-cloudOK)>=CLOUD_LOSS_MS)))
         offLocked(i);
     xSemaphoreGive(relayLock);
@@ -326,11 +336,11 @@ void readSerial() {
 
 const char PAGE[] PROGMEM = R"YARUMOHTML(<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Yarumo IoT X4</title><style>
 *{box-sizing:border-box}body{margin:0;background:#eef3f7;color:#152b3c;font:16px system-ui,sans-serif}header{background:#153d55;color:white;padding:20px}main{max-width:900px;margin:auto;padding:16px}h1{margin:0;font-size:25px}h2{font-size:19px}p{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.card{background:white;border:1px solid #d5e0e9;border-radius:12px;padding:14px}.val{font-size:24px;font-weight:bold;margin:8px 0}.muted{color:#526879;font-size:13px}button,input{font:inherit;padding:10px;border-radius:7px}button{border:0;background:#176b80;color:white;cursor:pointer;margin:4px 0}button:disabled{opacity:.45}button.off{background:#933e3e}input{width:100%;border:1px solid #aebfcb}.status{padding:10px;background:white;border-radius:8px;min-height:42px}.on{color:#077346}.idle{color:#526879}footer{font-size:13px;margin:20px 0;color:#526879}
-</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.4.0 · Panel local</p></header><main>
+</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.4.1 · Panel local</p></header><main>
 <p id="status" class="status" role="status">Conectando...</p><p id="info" class="muted"></p>
 <h2>Entradas digitales</h2><div id="di" class="grid"></div>
 <h2>Entradas analógicas</h2><div id="ai" class="grid"></div>
-<p><a href="/plc">Abrir simulador PLC V0.4</a></p><h2>Relés y temporización</h2><p>Selecciona un pulso de 0,05 a 86400 segundos (24 h). No se prolonga un pulso activo.</p>
+<p><a href="/plc">Simulador PLC</a> · <a href="/plc-physical">Control físico PLC (banco de pruebas)</a></p><h2>Relés y temporización</h2><p>Selecciona un pulso de 0,05 a 86400 segundos (24 h). No se prolonga un pulso activo.</p>
 <div id="relays" class="grid"></div><button class="off" id="all" disabled>Apagar todos</button>
 <footer>Banco de pruebas: sin cargas conectadas. El estado mostrado es la orden GPIO, no la posición física del contacto. Acceso únicamente en red local de confianza.</footer></main>
 <script>
@@ -343,7 +353,7 @@ aiPins.forEach((p,i)=>{$('ai').insertAdjacentHTML('beforeend','<div class="card"
 doPins.forEach((p,i)=>{$('relays').insertAdjacentHTML('beforeend','<div class="card">Relé '+(i+1)+' · GPIO'+p+'<div class="val" id="r'+i+'">--</div><div class="muted" id="t'+i+'"></div><label>Tiempo (s)<input id="sec'+i+'" type="number" min=".05" max="86400" step=".05" value="2"></label><button id="hold'+i+'" disabled>Encender</button> <button id="go'+i+'" disabled>Pulso</button> <button class="off" id="off'+i+'" disabled>Apagar</button></div>');$('hold'+i).onclick=()=>send('on',i+1);$('go'+i).onclick=()=>pulse(i);$('off'+i).onclick=()=>send('off',i+1)});
 $('all').onclick=()=>send('all',0);refresh();setInterval(refresh,750);}
 function controls(){doPins.forEach((p,i)=>{$('hold'+i).disabled=!online||busy||simLocked||!!states[i];$('go'+i).disabled=!online||busy||simLocked||!!states[i];$('off'+i).disabled=!online||busy});$('all').disabled=!online||busy;}
-async function refresh(){if(polling||busy)return;polling=true;try{const r=await fetch('/api/status',{cache:'no-store',signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();online=true;states=s.relay_cmd;simLocked=s.simulation_lock===true;$('status').textContent=simLocked?'Simulación: relés físicos bloqueados hasta reinicio':'Conectado';$('info').textContent='ID '+s.device+' · Firmware '+s.version;
+async function refresh(){if(polling||busy)return;polling=true;try{const r=await fetch('/api/status',{cache:'no-store',signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();online=true;states=s.relay_cmd;simLocked=s.simulation_lock===true||s.plc_locked===true;$('status').textContent=simLocked?'Modo PLC: activación manual bloqueada hasta reinicio':'Conectado';$('info').textContent='ID '+s.device+' · Firmware '+s.version;
 s.di.forEach((v,i)=>{$('d'+i).textContent=v?'HIGH':'LOW';$('d'+i).className='val '+(v?'on':'idle')});s.ai_mv.forEach((v,i)=>{$('a'+i).textContent=v+' mV';$('raw'+i).textContent='ADC '+s.ai_raw[i]+' / 4095'});states.forEach((v,i)=>{$('r'+i).textContent=v?'ON':'OFF';$('r'+i).className='val '+(v?'on':'idle');$('t'+i).textContent=v?(s.remaining_ms[i]>0?(s.remaining_ms[i]/1000).toFixed(1)+' s restantes':'Encendido continuo'):'Apagado'});
 }catch(e){online=false;$('status').textContent='Sin conexión o lectura no disponible';}finally{polling=false;controls();}}
 function pulse(i){const v=Number($('sec'+i).value);if(!Number.isFinite(v)||v<.05||v>86400){alert('Tiempo entre 0,05 y 86400 s');return;}send('pulse',i+1,Math.round(v*1000));}
@@ -372,6 +382,7 @@ String statusJson() {
   j += "],\"relay_cmd\":[";
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=on[i]?'1':'0'; }
   j += "],\"simulation_lock\":"; j += simulationLock?"true":"false";
+  j += ",\"plc_locked\":"; j += physicalLock?"true":"false";
   j += ",\"hold_supported\":true,\"max_pulse_ms\":"; j += String(MAX_PULSE_MS);
   j += ",\"remaining_ms\":[";
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=String(remaining[i]); }
@@ -435,11 +446,101 @@ void webSim(){
   if(!webAuth())return;
   if(web.header("X-Yarumo-Control")!="1"){web.send(403,"text/plain","Missing control header");return;}
   String action=web.arg("action");uint32_t v=0;
+  if(action=="run"&&physicalLock){web.send(409,"text/plain","Reinicia para cambiar de modo PLC");return;}
   if(action=="run"&&parseUInt(web.arg("preset").c_str(),v)&&v>=1&&v<=3)simRun(v);
   else if(action=="stop")simStop();
   else if(action=="input"&&plcSim.mode()==yarumo::Mode::Running&&parseUInt(web.arg("n").c_str(),v)&&v>=1&&v<=2)simInputs.di[v-1]=!simInputs.di[v-1];
   else {web.send(400,"text/plain","Invalid simulation command");return;}
   web.send(200,"application/json",simJson());
+}
+
+
+const char PHYS_PAGE[] PROGMEM=R"PHYSHTML(<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PLC físico · Yarumo</title><style>body{font:16px system-ui;max-width:800px;margin:20px auto;padding:0 16px;background:#eef3f7;color:#183d55}section{background:white;padding:16px;border-radius:8px;margin:12px 0}button,input{font:inherit;padding:10px;margin:4px}button:disabled{opacity:.4}#stop{background:#a33;color:white}.warn{background:#fff3d7;padding:10px}pre{white-space:pre-wrap}</style><h1>Yarumo PLC · control físico experimental</h1><p><a href="/">Panel local</a></p><p class="warn">Solo banco de pruebas sin cargas. Las salidas son relés REALES. DI usa nivel GPIO crudo (HIGH en reposo con pull-up). No conectar tensiones externas. STOP no sustituye un paro de emergencia cableado.</p><section><label>Programa JSON exportado del editor FBD <input id="file" type="file" accept=".json,application/json"></label><button id="install">Instalar en STOP</button><button id="run">RUN físico</button><button id="stop">STOP / todos OFF</button><p>El modo manual queda bloqueado hasta reiniciar. El programa se conserva en memoria NVS, pero siempre inicia en STOP. Sin Wi-Fi, el PLC continúa; para detenerlo sin red usa desconexión segura de alimentación.</p><p id="msg" role="status"></p></section><section><h2>Estado del PLC</h2><pre id="state">Conectando…</pre></section><script>
+const $=id=>document.getElementById(id);let busy=false,s=null;
+function render(){if(!s)return;$('state').textContent='Modo: '+s.mode+' · Programa: '+(s.installed?'instalado':'ninguno')+'\nDI: '+s.di.join('  ')+'\nAI: '+s.ai.join('  ')+'\nDO: '+s.out.join('  ')+'\nFallo de ciclo: '+(s.fault?'sí':'no');$('run').disabled=busy||!s.installed||s.mode==='RUN'||s.simulation;$('install').disabled=busy||s.mode==='RUN'||s.simulation;$('stop').disabled=busy;}
+async function refresh(){if(busy)return;try{const r=await fetch('/api/plc-physical',{cache:'no-store',signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('HTTP '+r.status);s=await r.json();render();}catch(e){s=null;$('state').textContent='Sin comunicación. El PLC físico puede seguir ejecutándose.';$('run').disabled=$('install').disabled=true;}}
+async function send(action,program=''){if(busy)return;busy=true;render();try{const r=await fetch('/api/plc-physical',{method:'POST',headers:{'X-Yarumo-Control':'1'},body:new URLSearchParams({action,program}),signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error(await r.text());s=await r.json();$('msg').textContent='Orden aplicada: '+action;}catch(e){$('msg').textContent=e.message;}finally{busy=false;render();refresh();}}
+$('install').onclick=async()=>{try{const f=$('file').files[0];if(!f||f.size>100000)throw Error('Selecciona un JSON FBD válido');const p=JSON.parse(await f.text()).program;if(!p)throw Error('Falta programa compilado');await send('install',JSON.stringify({schema:p.schema,count:p.count,nodes:p.nodes,output:p.output}));}catch(e){$('msg').textContent=e.message;}};
+$('run').onclick=()=>{if(confirm('Confirmo banco sin cargas y autorización para activar relés reales. ¿RUN?'))send('run');};$('stop').onclick=()=>send('stop');$('run').disabled=$('install').disabled=true;refresh();setInterval(refresh,500);
+</script></html>)PHYSHTML";
+bool physicalRunning(){
+  if(!relayLock)return false;
+  xSemaphoreTake(relayLock,portMAX_DELAY);bool run=plcActive;xSemaphoreGive(relayLock);return run;
+}
+bool decodeProgram(const String& raw,yarumo::Program& p){
+  if(!raw.length()||raw.length()>8192)return false;
+  JsonDocument doc;if(deserializeJson(doc,raw,DeserializationOption::NestingLimit(8)))return false;
+  JsonObjectConst o=doc.as<JsonObjectConst>();if(o.isNull()||!o["schema"].is<int>()||o["schema"].as<int>()!=1||!o["count"].is<int>())return false;
+  int count=o["count"].as<int>();JsonArrayConst ns=o["nodes"].as<JsonArrayConst>(),out=o["output"].as<JsonArrayConst>();
+  if(count<1||count>yarumo::MAX_NODES||ns.size()!=size_t(count)||out.size()!=4)return false;
+  const char* names[]={"DI","AI_GE","AI_LE","CONST","NOT","AND","OR","TON","TOF","TP","RS","CTU","CTD"};
+  p=yarumo::Program{};p.count=count;
+  for(int i=0;i<count;i++){
+    JsonObjectConst n=ns[i].as<JsonObjectConst>();
+    if(!n["op"].is<const char*>()||!n["a"].is<int>()||!n["b"].is<int>()||!n["p"].is<uint32_t>())return false;
+    int a=n["a"].as<int>(),b=n["b"].as<int>();uint32_t par=n["p"].as<uint32_t>();
+    if(a<0||a>255||b<0||b>255||par>yarumo::MAX_TIME)return false;
+    int op=-1;for(unsigned k=0;k<sizeof(names)/sizeof(names[0]);k++)if(!strcmp(n["op"].as<const char*>(),names[k])){op=k;break;}
+    if(op<0)return false;
+    p.nodes[i]={static_cast<yarumo::Op>(op),static_cast<uint8_t>(a),static_cast<uint8_t>(b),par};
+  }
+  for(int i=0;i<4;i++){if(!out[i].is<int>())return false;int v=out[i].as<int>();if(v< -1||v>=count)return false;p.output[i]=v;}
+  return yarumo::Engine::valid(p);
+}
+bool restorePhysical(){
+  if(!nvsOK)return false;
+  size_t n=prefs.getString("plc_v1").length();if(!n||n>8192)return false;
+  yarumo::Program p;if(!decodeProgram(prefs.getString("plc_v1"),p))return false;
+  physicalInstalled=plcPhysical.install(p);return physicalInstalled;
+}
+bool installPhysical(const String& raw){
+  if(simulationLock||physicalRunning()||!nvsOK||!timerReady)return false;
+  yarumo::Program p;if(!decodeProgram(raw,p))return false;
+  physicalLock=true;allOff();
+  if(prefs.putString("plc_v1",raw)!=raw.length()||prefs.getString("plc_v1")!=raw)return false;
+  physicalInstalled=plcPhysical.install(p);return physicalInstalled;
+}
+bool armPhysical(){
+  if(simulationLock||!physicalInstalled||!timerReady||!relayLock||updating||physicalRunning())return false;
+  physicalLock=true;allOff();const uint32_t now=millis();
+  if(!plcPhysical.arm(now))return false;
+  xSemaphoreTake(relayLock,portMAX_DELAY);plcWatchFault=false;plcHeartbeat=now;plcActive=true;xSemaphoreGive(relayLock);return true;
+}
+void tickPhysical(){
+  if(!physicalRunning())return;
+  const uint32_t now=millis();
+  xSemaphoreTake(relayLock,portMAX_DELAY);uint32_t prev=plcHeartbeat;xSemaphoreGive(relayLock);
+  if(uint32_t(now-prev)<20)return;
+  yarumo::Inputs in;for(uint8_t i=0;i<6;i++)in.di[i]=digitalRead(DI[i])==HIGH;
+  for(uint8_t i=0;i<4;i++)in.ai[i]=analogRead(AI[i]);
+  const uint32_t sampled=millis();bool ok=plcPhysical.scan(sampled,in);
+  xSemaphoreTake(relayLock,portMAX_DELAY);
+  if(!ok||!plcActive||uint32_t(millis()-prev)>PLC_WATCH_MS){
+    plcActive=false;plcWatchFault=true;plcPhysical.stop();for(uint8_t i=0;i<4;i++)offLocked(i);
+  }else{
+    for(uint8_t i=0;i<4;i++){const bool q=plcPhysical.outputs().relay[i];if(relayOn[i]!=q)digitalWrite(DO_PIN[i],q?RELAY_ON:RELAY_OFF);relayOn[i]=q;relayTimed[i]=cloudHold[i]=false;pulseEnd[i]=0;}
+    plcHeartbeat=sampled;
+  }
+  xSemaphoreGive(relayLock);
+}
+String physicalJson(){
+  JsonDocument d;bool active=false,fault=false;bool on[4]={};
+  if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);active=plcActive;fault=plcWatchFault;for(uint8_t i=0;i<4;i++)on[i]=relayOn[i];xSemaphoreGive(relayLock);}
+  d["mode"]=fault?"FAULT":active?"RUN":"STOP";d["fault"]=fault;d["installed"]=physicalInstalled;d["simulation"]=simulationLock;
+  JsonArray di=d["di"].to<JsonArray>();for(uint8_t p:DI)di.add(digitalRead(p));
+  JsonArray ai=d["ai"].to<JsonArray>();for(uint8_t p:AI)ai.add(analogRead(p));
+  JsonArray out=d["out"].to<JsonArray>();for(bool q:on)out.add(q?1:0);
+  String s;serializeJson(d,s);return s;
+}
+void webPhysical(){
+  if(!webAuth())return;
+  if(web.header("X-Yarumo-Control")!="1"){web.send(403,"text/plain","Missing control header");return;}
+  String action=web.arg("action");bool ok=false;
+  if(action=="stop"){allOff();ok=true;}
+  else if(action=="install")ok=installPhysical(web.arg("program"));
+  else if(action=="run")ok=armPhysical();
+  if(!ok){web.send(409,"text/plain","Programa invalido o modo no disponible; STOP antes de instalar.");return;}
+  web.send(200,"application/json",physicalJson());
 }
 
 void configureWeb() {
@@ -453,6 +554,9 @@ void configureWeb() {
   web.on("/plc",HTTP_GET,[](){if(webAuth())web.send_P(200,"text/html; charset=utf-8",PLC_PAGE);});
   web.on("/api/plc",HTTP_GET,[](){if(webAuth())web.send(200,"application/json",simJson());});
   web.on("/api/plc",HTTP_POST,webSim);
+  web.on("/plc-physical",HTTP_GET,[](){if(webAuth())web.send_P(200,"text/html; charset=utf-8",PHYS_PAGE);});
+  web.on("/api/plc-physical",HTTP_GET,[](){if(webAuth())web.send(200,"application/json",physicalJson());});
+  web.on("/api/plc-physical",HTTP_POST,webPhysical);
   web.onNotFound([](){ web.send(404,"text/plain","Not found"); });
 }
 
@@ -580,8 +684,8 @@ void tickWiFi() {
     }
   }
   if (!up && wifiWasUp) {
-    allOff();
-    Serial.println("WiFi lost; all relays off");
+    if(!physicalRunning()){allOff();Serial.println("WiFi lost; manual relays off");}
+    else Serial.println("WiFi lost; physical PLC remains autonomous");
     if (otaReady) { ArduinoOTA.end(); otaReady = false; }
     if (webReady) { web.close(); webReady=false; }
   }
@@ -626,6 +730,7 @@ void setup() {
     help();
     return;
   }
+  if(restorePhysical()){physicalLock=true;Serial.println("PLC: program restored in STOP");}
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.setPassword(OTA_PASS);
   ArduinoOTA.onStart([]() { updating = true; cloudPaused.store(true); simStop(); allOff(); });
@@ -646,6 +751,7 @@ void loop() {
   tickWiFi();
   if (otaReady) ArduinoOTA.handle();
   if (!updating) {
+    tickPhysical();
     tickSim();
     tickCloud();
     if (webReady) web.handleClient();
