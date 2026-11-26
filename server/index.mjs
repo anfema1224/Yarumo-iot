@@ -83,8 +83,9 @@ app.get('/api/devices/:id/commands',auth,asyncRoute(async(req,res)=>{
 app.post('/api/devices/:id/commands',csrf,auth,throttle('cmd:',90,60000),asyncRoute(async(req,res)=>{
  const cmd=command(req.body);if(!isUuid(req.params.id)||!cmd)return res.status(400).json({error:'Orden inválida'});
  const c=await pool.connect();try{await c.query('BEGIN');
- const d=await c.query("SELECT id,COALESCE(last_seen>now()-interval '15 seconds',false) AS online FROM devices WHERE id=$1 AND owner_id=$2 FOR UPDATE",[req.params.id,req.user.id]);
+ const d=await c.query("SELECT id,snapshot,COALESCE(last_seen>now()-interval '15 seconds',false) AS online FROM devices WHERE id=$1 AND owner_id=$2 FOR UPDATE",[req.params.id,req.user.id]);
  if(!d.rowCount||!d.rows[0].online){await c.query('ROLLBACK');return res.status(409).json({error:'Dispositivo no disponible'});}
+ if(cmd.action==='pulse'&&cmd.ms===0&&d.rows[0].snapshot?.hold_supported!==true){await c.query('ROLLBACK');return res.status(409).json({error:'Actualiza el firmware para encendido continuo'});}
  await c.query("UPDATE commands SET state='expired',finished_at=now() WHERE device_id=$1 AND state='queued' AND expires_at<=now()",[req.params.id]);
  if(cmd.action==='pulse'){const p=await c.query("SELECT 1 FROM commands WHERE device_id=$1 AND state='queued'",[req.params.id]);if(p.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Hay una orden pendiente'});}}
  else await c.query("UPDATE commands SET state='cancelled',finished_at=now() WHERE device_id=$1 AND state='queued'",[req.params.id]);
@@ -106,8 +107,13 @@ app.post('/api/device/poll',throttle('poll:',300,60000),asyncRoute(async(req,res
  await c.query("UPDATE commands SET state='expired',finished_at=now() WHERE device_id=$1 AND state='queued' AND expires_at<=now()",[d.id]);
  await c.query("UPDATE commands SET state='unknown',finished_at=now() WHERE device_id=$1 AND state='delivered' AND delivered_at<now()-interval '30 seconds'",[d.id]);
  const q=await c.query("SELECT id,action,relay,ms,GREATEST(0,floor(extract(epoch FROM (expires_at-clock_timestamp()))*1000))::int AS ttl_ms FROM commands WHERE device_id=$1 AND state='queued' AND expires_at>clock_timestamp() ORDER BY created_at LIMIT 1 FOR UPDATE",[d.id]);
- if(q.rowCount)await c.query("UPDATE commands SET state='delivered',delivered_at=now() WHERE id=$1",[q.rows[0].id]);
- await c.query('COMMIT');res.json({command:q.rows[0]||null});
+ let outgoing=q.rows[0]||null;
+ if(outgoing){
+   const hold=outgoing.action==='pulse'&&outgoing.ms===0;
+   if(hold&&!s.hold_supported){await c.query("UPDATE commands SET state='rejected',finished_at=now() WHERE id=$1",[outgoing.id]);outgoing=null;}
+   else {await c.query("UPDATE commands SET state='delivered',delivered_at=now() WHERE id=$1",[outgoing.id]);if(hold)outgoing={...outgoing,action:'on'};}
+ }
+ await c.query('COMMIT');res.json({command:outgoing});
  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }));
 app.use(express.static(fileURLToPath(new URL('../public/',import.meta.url)),{etag:false,maxAge:0}));
