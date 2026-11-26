@@ -34,7 +34,7 @@
 #define YARUMO_REPLACE_CONFIG 0
 #endif
 
-constexpr char VERSION[] = "0.3.3";
+constexpr char VERSION[] = "0.3.4";
 char WIFI_SSID[33] = {};
 char WIFI_PASS[65] = {};
 char OTA_PASS[129] = {};
@@ -89,6 +89,9 @@ bool webEnabled = false;
 bool nvsOK = false;
 bool relayOn[4] = {};
 uint32_t pulseEnd[4] = {};
+bool relayTimed[4] = {}, cloudHold[4] = {};
+std::atomic<uint32_t> lastCloudOK{0};
+constexpr uint32_t CLOUD_LOSS_MS = 60000;
 bool otaReady = false, updating = false;
 bool wifiWasUp = false;
 uint32_t reportRate = DEFAULT_RATE, lastReport = 0, lastRetry = 0;
@@ -178,6 +181,7 @@ void offLocked(uint8_t i) {
   digitalWrite(DO_PIN[i], RELAY_OFF);
   relayOn[i] = false;
   pulseEnd[i] = 0;
+  relayTimed[i] = false; cloudHold[i] = false;
 }
 void offRelay(uint8_t i) {
   if (relayLock) xSemaphoreTake(relayLock, portMAX_DELAY);
@@ -196,18 +200,32 @@ bool startPulse(uint8_t i, uint32_t ms) {
   // Do not extend a running pulse; turn it off first if needed.
   if (relayOn[i]) { xSemaphoreGive(relayLock); return false; }
   pulseEnd[i] = millis() + ms;
+  relayTimed[i] = true; cloudHold[i] = false;
   relayOn[i] = true;
   digitalWrite(DO_PIN[i], RELAY_ON);
   xSemaphoreGive(relayLock);
   return true;
 }
+bool cloudFresh() { const uint32_t t=lastCloudOK.load(); return uint32_t(millis()-t)<CLOUD_LOSS_MS; }
+bool startHold(uint8_t i,bool remote) {
+  if(!timerReady||!relayLock||i>=4||updating||WiFi.status()!=WL_CONNECTED) return false;
+  xSemaphoreTake(relayLock,portMAX_DELAY);
+  if(relayOn[i] || WiFi.status()!=WL_CONNECTED ||
+      (remote && !cloudFresh())){
+    xSemaphoreGive(relayLock);return false;
+  }
+  relayTimed[i]=false;cloudHold[i]=remote;relayOn[i]=true;
+  digitalWrite(DO_PIN[i],RELAY_ON);
+  xSemaphoreGive(relayLock);return true;
+}
 void timerTask(void*) {
   for (;;) {
     xSemaphoreTake(relayLock, portMAX_DELAY);
+    const uint32_t cloudOK = lastCloudOK.load();
     const uint32_t now = millis();
     const bool connected = WiFi.status() == WL_CONNECTED;
     for (uint8_t i = 0; i < 4; ++i)
-      if (relayOn[i] && (!connected || (int32_t)(now - pulseEnd[i]) >= 0))
+      if (relayOn[i] && (!connected || (relayTimed[i] && (int32_t)(now - pulseEnd[i]) >= 0) || (cloudHold[i] && uint32_t(now-cloudOK)>=CLOUD_LOSS_MS)))
         offLocked(i);
     xSemaphoreGive(relayLock);
     vTaskDelay(pdMS_TO_TICKS(10) > 0 ? pdMS_TO_TICKS(10) : 1);
@@ -218,7 +236,7 @@ void relaySnapshot(bool* on, uint32_t* remaining) {
   uint32_t now = millis();
   for (uint8_t i = 0; i < 4; ++i) {
     on[i] = relayOn[i];
-    remaining[i] = on[i] && (int32_t)(pulseEnd[i] - now) > 0 ? pulseEnd[i] - now : 0;
+    remaining[i] = on[i] && relayTimed[i] && (int32_t)(pulseEnd[i] - now) > 0 ? pulseEnd[i] - now : 0;
   }
   if (relayLock) xSemaphoreGive(relayLock);
 }
@@ -315,11 +333,11 @@ let online=false,busy=false,states=[0,0,0,0],polling=false;
 function init(){
 diPins.forEach((p,i)=>{$('di').insertAdjacentHTML('beforeend','<div class="card">DI'+(i+1)+' · GPIO'+p+'<div class="val" id="d'+i+'">--</div></div>')});
 aiPins.forEach((p,i)=>{$('ai').insertAdjacentHTML('beforeend','<div class="card">AI'+(i+1)+' · GPIO'+p+'<div class="val" id="a'+i+'">--</div><div class="muted" id="raw'+i+'"></div></div>')});
-doPins.forEach((p,i)=>{$('relays').insertAdjacentHTML('beforeend','<div class="card">Relé '+(i+1)+' · GPIO'+p+'<div class="val" id="r'+i+'">--</div><div class="muted" id="t'+i+'"></div><label>Tiempo (s)<input id="sec'+i+'" type="number" min=".05" max="10" step=".05" value="2"></label><button id="go'+i+'" disabled>Activar</button> <button class="off" id="off'+i+'" disabled>Apagar</button></div>');$('go'+i).onclick=()=>pulse(i);$('off'+i).onclick=()=>send('off',i+1)});
+doPins.forEach((p,i)=>{$('relays').insertAdjacentHTML('beforeend','<div class="card">Relé '+(i+1)+' · GPIO'+p+'<div class="val" id="r'+i+'">--</div><div class="muted" id="t'+i+'"></div><label>Tiempo (s)<input id="sec'+i+'" type="number" min=".05" max="10" step=".05" value="2"></label><button id="hold'+i+'" disabled>Encender</button> <button id="go'+i+'" disabled>Pulso</button> <button class="off" id="off'+i+'" disabled>Apagar</button></div>');$('hold'+i).onclick=()=>send('on',i+1);$('go'+i).onclick=()=>pulse(i);$('off'+i).onclick=()=>send('off',i+1)});
 $('all').onclick=()=>send('all',0);refresh();setInterval(refresh,750);}
-function controls(){doPins.forEach((p,i)=>{$('go'+i).disabled=!online||busy||!!states[i];$('off'+i).disabled=!online||busy});$('all').disabled=!online||busy;}
+function controls(){doPins.forEach((p,i)=>{$('hold'+i).disabled=!online||busy||!!states[i];$('go'+i).disabled=!online||busy||!!states[i];$('off'+i).disabled=!online||busy});$('all').disabled=!online||busy;}
 async function refresh(){if(polling||busy)return;polling=true;try{const r=await fetch('/api/status',{cache:'no-store',signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();online=true;states=s.relay_cmd;$('status').textContent='Conectado';$('info').textContent='ID '+s.device+' · Firmware '+s.version;
-s.di.forEach((v,i)=>{$('d'+i).textContent=v?'HIGH':'LOW';$('d'+i).className='val '+(v?'on':'idle')});s.ai_mv.forEach((v,i)=>{$('a'+i).textContent=v+' mV';$('raw'+i).textContent='ADC '+s.ai_raw[i]+' / 4095'});states.forEach((v,i)=>{$('r'+i).textContent=v?'ON':'OFF';$('r'+i).className='val '+(v?'on':'idle');$('t'+i).textContent=(s.remaining_ms[i]/1000).toFixed(1)+' s restantes'});
+s.di.forEach((v,i)=>{$('d'+i).textContent=v?'HIGH':'LOW';$('d'+i).className='val '+(v?'on':'idle')});s.ai_mv.forEach((v,i)=>{$('a'+i).textContent=v+' mV';$('raw'+i).textContent='ADC '+s.ai_raw[i]+' / 4095'});states.forEach((v,i)=>{$('r'+i).textContent=v?'ON':'OFF';$('r'+i).className='val '+(v?'on':'idle');$('t'+i).textContent=v?(s.remaining_ms[i]>0?(s.remaining_ms[i]/1000).toFixed(1)+' s restantes':'Encendido continuo'):'Apagado'});
 }catch(e){online=false;$('status').textContent='Sin conexión o lectura no disponible';}finally{polling=false;controls();}}
 function pulse(i){const v=Number($('sec'+i).value);if(!Number.isFinite(v)||v<.05||v>10){alert('Tiempo entre 0,05 y 10 s');return;}send('pulse',i+1,Math.round(v*1000));}
 async function send(action,n,ms=0){if(!online||busy)return;busy=true;controls();try{const body=new URLSearchParams({action,n:String(n),ms:String(ms)});const r=await fetch('/api/relay',{method:'POST',headers:{'X-Yarumo-Control':'1'},body,signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error(await r.text());}catch(e){alert('No confirmado: '+e.message);}finally{busy=false;await refresh();controls();}}
@@ -346,7 +364,7 @@ String statusJson() {
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=String(analogReadMilliVolts(AI[i])); }
   j += "],\"relay_cmd\":[";
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=on[i]?'1':'0'; }
-  j += "],\"remaining_ms\":[";
+  j += "],\"hold_supported\":true,\"remaining_ms\":[";
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=String(remaining[i]); }
   j += "]}"; return j;
 }
@@ -359,6 +377,7 @@ void webRelay() {
   uint32_t n,ms;
   if (!parseUInt(web.arg("n").c_str(),n)||n<1||n>4) { web.send(400,"text/plain","Invalid relay"); return; }
   if (action=="off") { offRelay(n-1); web.send(200,"text/plain","OK"); return; }
+  if (action=="on") { if(startHold(n-1,false)) web.send(200,"text/plain","OK"); else web.send(409,"text/plain","Relay busy or not available"); return; }
   if (action=="pulse" && parseUInt(web.arg("ms").c_str(),ms) && ms>=50 && ms<=MAX_PULSE_MS) {
     if (startPulse(n-1,ms)) web.send(200,"text/plain","OK");
     else web.send(409,"text/plain","Relay busy or not available");
@@ -425,6 +444,7 @@ void cloudTask(void*) {
               String response=http.getString();
               JsonDocument reply;
               if(response.length()<=2048&&!deserializeJson(reply,response)){
+                lastCloudOK.store(millis());
                 pending={};
                 JsonObjectConst cmd=reply["command"].as<JsonObjectConst>();
                 if(!cmd.isNull()){
@@ -472,6 +492,7 @@ void tickCloud() {
       if(!strcmp(o.action,"all")){allOff();ok=true;}
       else if(o.relay>=1&&o.relay<=4){
         if(!strcmp(o.action,"off")){offRelay(o.relay-1);ok=true;}
+        else if(!strcmp(o.action,"on")&&o.ms==0)ok=startHold(o.relay-1,true);
         else if(!strcmp(o.action,"pulse"))ok=startPulse(o.relay-1,o.ms);
       }
     }
