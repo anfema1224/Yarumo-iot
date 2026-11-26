@@ -1,0 +1,17 @@
+{
+  "name": "yarumo-iot",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "start": "node server/start.mjs",
+    "test": "node --check server/start.mjs && node --check server/bootstrap.mjs && node --check server/index.mjs && node --check public/app.js && node --test server/validation.test.mjs && node --check public/plc/editor.mjs && node --test server/plc-editor.test.mjs && node --check server/plc-remote.mjs && node --test server/plc-remote.test.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}

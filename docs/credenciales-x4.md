@@ -1,0 +1,8 @@
+# X4 V0.3.1 — credenciales persistentes
+La V0.2 no almacenaba claves. La primera carga de V0.3.1 debe incluir un archivo local secrets.h junto a Yarumo_X4_V03.ino, copiado desde secrets.example.h. No publicar ni compartir ese archivo o el binario de aprovisionamiento. Instalar ArduinoJson 7.
+Completar Wi-Fi, OTA y panel local una sola vez. Si token y CA ya están disponibles, incluirlos; de lo contrario dejar vacíos y la nube permanece deshabilitada. La URL del servidor ya está incorporada.
+Cargar por OTA con la contraseña del firmware que está instalado, sin cargas eléctricas. Verificar por serial CONFIG: saved to NVS, acceso web y OTA. El firmware almacena una configuración versionada (namespace yarumo, clave cfg_v1), sin imprimir credenciales.
+Tras verificar, quitar secrets.h de la carpeta activa (guardar copia privada si se necesita). Actualizar por OTA con nuevos sketches compatibles, conservando particiones y sin borrar NVS. Al reiniciar verificar CONFIG: loaded from NVS. Las claves no se vuelven a pedir.
+Para sustituir claves o añadir token/CA más adelante, aprovisionar una vez con todos los valores correctos y YARUMO_REPLACE_CONFIG 1. Después quitar el header o volver a 0. Si se pierde configuración o se borra toda la flash, recuperar por USB-TTL. Si NVS no está disponible o es inválida, el firmware no inicia red/OTA.
+NVS no es cifrada por defecto: alguien con acceso físico a flash puede extraer claves. No es un producto de seguridad industrial. El certificado TLS debe ser verificado y no se permite setInsecure.
+Estado: cambios escritos y revisión estática; compilación Arduino IDE, persistencia en dos cargas consecutivas y funcionamiento remoto aún pendientes.

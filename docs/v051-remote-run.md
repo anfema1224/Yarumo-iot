@@ -1,0 +1,10 @@
+# V0.5.1 — RUN remoto y arranque configurable
+La base V0.5.0 fue validada por el usuario en transferencia real. V0.5.1 agrega RUN remoto y política manual/automática. No requiere migración: reutiliza plc_jobs y distingue kind en program JSON; el firmware 0.5.0 sigue compatible para transferencia y STOP.
+- RUN/arranque requieren usuario propietario, revisión guardada e instalada idéntica, estado STOP, las cuatro salidas apagadas, firmware compatible y época de control vigente. TTL 10 s, sin reintento automático.
+- Arranque automático requiere confirmación explícita, se guarda en NVS vinculado a la revisión y solo arma en ESP_RST_POWERON. STOP, instalación, simulación, OTA y detección de fallo de scan revocan la política. STOP no es paro de emergencia. Corte de red no detiene un PLC en RUN; no conectar cargas en pruebas.
+- Al aplicar automático no comienza RUN inmediatamente. Después de STOP, el arranque vuelve a manual; para reactivar automático hay que autorizar otra vez. No autoarranca por reset de software, watchdog ni brownout. Un fallo NVS requiere intervención local; no garantizar protección con software únicamente.
+- Prueba: carga V0.5.1 preservando NVS, abre el programa guardado e instalado, RUN físico, STOP físico; comprueba estado real y ACK, prueba reinicio manual. Después selecciona automático y aplica en STOP, prueba desconectar/reconectar alimentación sin cargas; vuelve a STOP y verifica que el siguiente encendido permanezca detenido.
+- Antes de desplegar: CI Node y ESP32 aprobados; revisar estado de migración previa; no hay DDL nuevo. Pruebas de banco y pérdida de conexión pendientes.
+
+## Regreso al modo manual
+En Telemetría y control, pulsa Apagar todos / STOP PLC, verifica STOP con las cuatro salidas apagadas y pulsa Habilitar control manual. El ESP32 revoca el permiso de arranque automático y libera el bloqueo físico sin borrar el programa instalado. Solo tras confirmación de telemetría se habilitan las salidas manuales. La simulación local sigue requiriendo reinicio para salir de su bloqueo. El firmware 0.5.0 requiere reinicio para recuperar control manual.

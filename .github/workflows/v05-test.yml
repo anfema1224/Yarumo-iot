@@ -1,0 +1,27 @@
+name: V05 remote PLC tests
+on:
+  push:
+    branches: [feature/v05-remote-plc, feature/v051-remote-run]
+  pull_request:
+    branches: [feature/v03-cloud]
+permissions:
+  contents: read
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm test
+  esp32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - run: arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      - run: arduino-cli core install esp32:esp32@3.3.12 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      - run: arduino-cli lib install ArduinoJson@7.4.2
+      - run: arduino-cli compile --fqbn esp32:esp32:esp32 firmware/Yarumo_X4_V05
