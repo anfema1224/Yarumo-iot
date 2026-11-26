@@ -1,0 +1,18 @@
+name: FBD editor tests
+on:
+  push:
+    branches: [feature/v04-plc]
+    paths: ['public/plc/**', 'server/plc-editor.test.mjs', '.github/workflows/fbd-editor.yml']
+  pull_request:
+    paths: ['public/plc/**', 'server/plc-editor.test.mjs', '.github/workflows/fbd-editor.yml']
+permissions:
+  contents: read
+jobs:
+  editor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check public/plc/editor.mjs && node --test server/plc-editor.test.mjs
