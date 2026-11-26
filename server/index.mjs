@@ -117,6 +117,8 @@ app.post('/api/device/poll',throttle('poll:',300,60000),asyncRoute(async(req,res
  await c.query('COMMIT');res.json({command:outgoing});
  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }));
+// Protect editor pages and modules with the existing session; no device commands are issued by the editor.
+app.use('/plc',auth);
 app.use(express.static(fileURLToPath(new URL('../public/',import.meta.url)),{etag:false,maxAge:0}));
 app.use((err,req,res,next)=>{console.error('request failed',err.code||err.name);if(!res.headersSent)res.status(err.status===400?400:500).json({error:'Solicitud no completada'});});
 const cleanup=async()=>{try{await pool.query("DELETE FROM readings WHERE at<now()-interval '24 hours'");await pool.query("DELETE FROM sessions WHERE expires_at<=now()");await pool.query("UPDATE commands SET state='expired',finished_at=now() WHERE state='queued' AND expires_at<=now()");await pool.query("UPDATE commands SET state='unknown',finished_at=now() WHERE state='delivered' AND delivered_at<now()-interval '30 seconds'");await pool.query("DELETE FROM commands WHERE created_at<now()-interval '7 days'");}catch(e){console.error('cleanup failed',e.code||e.name);}};
