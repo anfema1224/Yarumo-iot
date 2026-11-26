@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node server/start.mjs",
-    "test": "node --check server/start.mjs && node --check server/bootstrap.mjs && node --check server/index.mjs && node --check public/app.js && node --test server/validation.test.mjs"
+    "test": "node --check server/start.mjs && node --check server/bootstrap.mjs && node --check server/index.mjs && node --check public/app.js && node --test server/validation.test.mjs && node --check public/plc/editor.mjs && node --test server/plc-editor.test.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",
