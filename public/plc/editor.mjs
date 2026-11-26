@@ -102,6 +102,7 @@ async function loadState(){
   $('target').replaceChildren(...remoteDevices.map(d=>{const o=el('option',d.name+' · '+d.hardware_id);o.value=d.id;return o;}));
   if(remoteDevices.some(d=>d.id===selected))$('target').value=selected;
   const id=$('target').value;remoteData=null;if(id){const result=await request(route(id));if($('target').value===id)remoteData=result;}
+  if(stopOrder&&stopOrder.device===id){const orders=await request('/api/devices/'+encodeURIComponent(id)+'/commands');const order=orders.find(o=>o.id===stopOrder.id);if(order){remoteMessage('STOP físico: '+order.state+' · verifica el modo y las salidas reales.');if(!['queued','delivered'].includes(order.state))stopOrder=null;}}
  }catch(e){remoteData=null;remoteMessage('No se pudo consultar: '+e.message);}
  finally{remotePolling=false;paintRemote();}
 }
