@@ -207,6 +207,7 @@ void offRelay(uint8_t i) {
   if (relayLock) xSemaphoreTake(relayLock, portMAX_DELAY);
   offLocked(i);
   if (relayLock) xSemaphoreGive(relayLock);
+  rotateEpoch();
 }
 void allOff() {
   if (relayLock) xSemaphoreTake(relayLock, portMAX_DELAY);
@@ -232,6 +233,7 @@ bool startPulse(uint8_t i, uint32_t ms, bool remote) {
   xSemaphoreTake(relayLock, portMAX_DELAY);
   // Do not extend a running pulse; turn it off first if needed.
   if (relayOn[i] || WiFi.status()!=WL_CONNECTED || (remote && !cloudFresh())) { xSemaphoreGive(relayLock); return false; }
+  rotateEpoch();
   pulseEnd[i] = millis() + ms;
   relayTimed[i] = true; cloudHold[i] = remote;
   relayOn[i] = true;
@@ -246,6 +248,7 @@ bool startHold(uint8_t i,bool remote) {
       (remote && !cloudFresh())){
     xSemaphoreGive(relayLock);return false;
   }
+  rotateEpoch();
   relayTimed[i]=false;cloudHold[i]=remote;relayOn[i]=true;
   digitalWrite(DO_PIN[i],RELAY_ON);
   xSemaphoreGive(relayLock);return true;
@@ -531,7 +534,7 @@ bool installPhysical(const String& raw){
   physicalInstalled=plcPhysical.install(p);if(physicalInstalled)revisionFrom(raw);return physicalInstalled;
 }
 bool armPhysical(){
-  if(simulationLock||!physicalInstalled||!timerReady||!relayLock||updating||physicalRunning())return false;
+  if(simulationLock||!physicalInstalled||!timerReady||!relayLock||updating||!bootPolicyOK||physicalRunning())return false;
   physicalLock=true;allOff();rotateEpoch();const uint32_t now=millis();
   if(!plcPhysical.arm(now))return false;
   xSemaphoreTake(relayLock,portMAX_DELAY);plcWatchFault=false;plcHeartbeat=now;plcActive=true;xSemaphoreGive(relayLock);return true;
@@ -543,11 +546,11 @@ bool physicalStoppedClear(){
  xSemaphoreGive(relayLock);return ok;
 }
 bool setAutoBoot(bool enable){
- if(!physicalStoppedClear()||!revisionValid(plcRevision)||!nvsOK)return false;
+ if(!physicalStoppedClear()||!revisionValid(plcRevision)||!nvsOK||!bootPolicyOK)return false;
  if(!enable){bool ok=clearAutoBoot();rotateEpoch();return ok;}
  // Persist only the exact installed revision, not a general enable flag.
  if(prefs.putString("plc_auto",plcRevision)!=strlen(plcRevision)||prefs.getString("plc_auto")!=plcRevision){clearAutoBoot();return false;}
- autoBoot=true;bootPolicyOK=true;rotateEpoch();return true;
+ autoBoot=true;bootPolicyOK=true;physicalLock=true;rotateEpoch();return true;
 }
 void tickPhysical(){
   if(!physicalRunning()){
@@ -586,7 +589,7 @@ void webPhysical(){
   String action=web.arg("action");bool ok=false;
   if(action=="stop"){explicitStop();ok=bootPolicyOK;}
   else if(action=="install"){JsonDocument d;if(!deserializeJson(d,web.arg("program"))){d.remove("revision");String raw;serializeJson(d,raw);ok=installPhysical(raw);}}
-  else if(action=="run")ok=armPhysical();
+  else if(action=="run")ok=physicalStoppedClear()&&armPhysical();
   if(!ok){web.send(409,"text/plain","Programa invalido o modo no disponible; STOP antes de instalar.");return;}
   web.send(200,"application/json",physicalJson());
 }
