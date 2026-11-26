@@ -373,7 +373,7 @@ aiPins.forEach((p,i)=>{$('ai').insertAdjacentHTML('beforeend','<div class="card"
 doPins.forEach((p,i)=>{$('relays').insertAdjacentHTML('beforeend','<div class="card">Relé '+(i+1)+' · GPIO'+p+'<div class="val" id="r'+i+'">--</div><div class="muted" id="t'+i+'"></div><label>Tiempo (s)<input id="sec'+i+'" type="number" min=".05" max="86400" step=".05" value="2"></label><button id="hold'+i+'" disabled>Encender</button> <button id="go'+i+'" disabled>Pulso</button> <button class="off" id="off'+i+'" disabled>Apagar</button></div>');$('hold'+i).onclick=()=>send('on',i+1);$('go'+i).onclick=()=>pulse(i);$('off'+i).onclick=()=>send('off',i+1)});
 $('all').onclick=()=>send('all',0);refresh();setInterval(refresh,750);}
 function controls(){doPins.forEach((p,i)=>{$('hold'+i).disabled=!online||busy||simLocked||!!states[i];$('go'+i).disabled=!online||busy||simLocked||!!states[i];$('off'+i).disabled=!online||busy});$('all').disabled=!online||busy;}
-async function refresh(){if(polling||busy)return;polling=true;try{const r=await fetch('/api/status',{cache:'no-store',signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();online=true;states=s.relay_cmd;simLocked=s.simulation_lock===true||s.plc_locked===true;$('status').textContent=simLocked?'Modo PLC: activación manual bloqueada hasta reinicio':'Conectado';$('info').textContent='ID '+s.device+' · Firmware '+s.version;
+async function refresh(){if(polling||busy)return;polling=true;try{const r=await fetch('/api/status',{cache:'no-store',signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();online=true;states=s.relay_cmd;simLocked=s.simulation_lock===true||s.plc_locked===true;$('status').textContent=simLocked?'Modo PLC: detén y libera el control desde la plataforma (o reinicia si simulación)':'Conectado';$('info').textContent='ID '+s.device+' · Firmware '+s.version;
 s.di.forEach((v,i)=>{$('d'+i).textContent=v?'HIGH':'LOW';$('d'+i).className='val '+(v?'on':'idle')});s.ai_mv.forEach((v,i)=>{$('a'+i).textContent=v+' mV';$('raw'+i).textContent='ADC '+s.ai_raw[i]+' / 4095'});states.forEach((v,i)=>{$('r'+i).textContent=v?'ON':'OFF';$('r'+i).className='val '+(v?'on':'idle');$('t'+i).textContent=v?(s.remaining_ms[i]>0?(s.remaining_ms[i]/1000).toFixed(1)+' s restantes':'Encendido continuo'):'Apagado'});
 }catch(e){online=false;$('status').textContent='Sin conexión o lectura no disponible';}finally{polling=false;controls();}}
 function pulse(i){const v=Number($('sec'+i).value);if(!Number.isFinite(v)||v<.05||v>86400){alert('Tiempo entre 0,05 y 86400 s');return;}send('pulse',i+1,Math.round(v*1000));}
@@ -545,6 +545,11 @@ bool physicalStoppedClear(){
  for(bool v:relayOn)if(v)ok=false;
  xSemaphoreGive(relayLock);return ok;
 }
+bool releaseManual(){
+ if(!physicalLock||!physicalStoppedClear())return false;
+ explicitStop();if(!bootPolicyOK)return false;
+ physicalLock=false;return true;
+}
 bool setAutoBoot(bool enable){
  if(!physicalStoppedClear()||!revisionValid(plcRevision)||!nvsOK||!bootPolicyOK)return false;
  if(!enable){bool ok=clearAutoBoot();rotateEpoch();return ok;}
@@ -590,6 +595,7 @@ void webPhysical(){
   if(action=="stop"){explicitStop();ok=bootPolicyOK;}
   else if(action=="install"){JsonDocument d;if(!deserializeJson(d,web.arg("program"))){d.remove("revision");String raw;serializeJson(d,raw);ok=installPhysical(raw);}}
   else if(action=="run")ok=physicalStoppedClear()&&armPhysical();
+  else if(action=="manual")ok=releaseManual();
   if(!ok){web.send(409,"text/plain","Programa invalido o modo no disponible; STOP antes de instalar.");return;}
   web.send(200,"application/json",physicalJson());
 }
@@ -671,7 +677,7 @@ void cloudTask(void*) {
                     strlcpy(o.id,id,sizeof(o.id));strlcpy(o.action,action,sizeof(o.action));
                     o.relay=(relay>=0&&relay<=4)?relay:255;o.ms=ms;
                     o.start=started;o.ttl=ttl<=10000?ttl:0;
-                    if(!strcmp(action,"plcrun")||!strcmp(action,"plcboot")){
+                    if(!strcmp(action,"plcrun")||!strcmp(action,"plcboot")||!strcmp(action,"plcman")){
                       const char* rev=cmd["revision"]|"",*epoch=cmd["epoch"]|"";
                       if(!revisionValid(rev)||strlen(epoch)!=16||(!strcmp(action,"plcboot")&&!cmd["auto"].is<bool>()))o.ttl=0;
                       else{strlcpy(o.revision,rev,sizeof(o.revision));strlcpy(o.epoch,epoch,sizeof(o.epoch));o.autoStart=cmd["auto"]|false;}
@@ -716,8 +722,8 @@ void tickCloud() {
     bool ok=false;
     if(!updating&&WiFi.status()==WL_CONNECTED&&o.ttl>0&&millis()-o.start<o.ttl){
       if(!strcmp(o.action,"all")){explicitStop();ok=bootPolicyOK;}
-      else if((!strcmp(o.action,"plcrun")||!strcmp(o.action,"plcboot"))&&physicalStoppedClear()&&!strcmp(o.revision,plcRevision)&&!strcmp(o.epoch,plcEpoch)){
-        ok=!strcmp(o.action,"plcrun")?armPhysical():setAutoBoot(o.autoStart);
+      else if((!strcmp(o.action,"plcrun")||!strcmp(o.action,"plcboot")||!strcmp(o.action,"plcman"))&&physicalStoppedClear()&&!strcmp(o.revision,plcRevision)&&!strcmp(o.epoch,plcEpoch)){
+        ok=!strcmp(o.action,"plcrun")?armPhysical():!strcmp(o.action,"plcman")?releaseManual():setAutoBoot(o.autoStart);
       }
       else if(!strcmp(o.action,"plcset")&&!simulationLock&&!physicalRunning()){
         bool clear=true;if(relayLock){xSemaphoreTake(relayLock,portMAX_DELAY);for(bool v:relayOn)if(v)clear=false;xSemaphoreGive(relayLock);}else clear=false;
