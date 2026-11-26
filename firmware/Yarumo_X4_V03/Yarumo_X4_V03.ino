@@ -34,7 +34,7 @@
 #define YARUMO_REPLACE_CONFIG 0
 #endif
 
-constexpr char VERSION[] = "0.3.4";
+constexpr char VERSION[] = "0.3.5";
 char WIFI_SSID[33] = {};
 char WIFI_PASS[65] = {};
 char OTA_PASS[129] = {};
@@ -77,7 +77,7 @@ constexpr uint8_t DI[] = {13, 14, 16, 17, 19, 27};
 constexpr uint8_t AI[] = {34, 35, 36, 39};
 constexpr uint8_t DO_PIN[] = {32, 33, 25, 26};
 constexpr uint8_t RELAY_ON = HIGH, RELAY_OFF = LOW;
-constexpr uint32_t MAX_PULSE_MS = 10000;
+constexpr uint32_t MAX_PULSE_MS = 86400000; // 24 h; < INT32_MAX, safe across millis rollover.
 constexpr uint32_t WIFI_RETRY_MS = 15000;
 constexpr uint32_t DEFAULT_RATE = 1000;
 Preferences prefs;
@@ -193,20 +193,20 @@ void allOff() {
   for (uint8_t i = 0; i < 4; ++i) offLocked(i);
   if (relayLock) xSemaphoreGive(relayLock);
 }
-bool startPulse(uint8_t i, uint32_t ms) {
+bool cloudFresh() { const uint32_t t=lastCloudOK.load(); return uint32_t(millis()-t)<CLOUD_LOSS_MS; }
+bool startPulse(uint8_t i, uint32_t ms, bool remote) {
   if (!timerReady || !relayLock || i >= 4 || ms < 50 ||
       ms > MAX_PULSE_MS || updating || WiFi.status() != WL_CONNECTED) return false;
   xSemaphoreTake(relayLock, portMAX_DELAY);
   // Do not extend a running pulse; turn it off first if needed.
-  if (relayOn[i]) { xSemaphoreGive(relayLock); return false; }
+  if (relayOn[i] || WiFi.status()!=WL_CONNECTED || (remote && !cloudFresh())) { xSemaphoreGive(relayLock); return false; }
   pulseEnd[i] = millis() + ms;
-  relayTimed[i] = true; cloudHold[i] = false;
+  relayTimed[i] = true; cloudHold[i] = remote;
   relayOn[i] = true;
   digitalWrite(DO_PIN[i], RELAY_ON);
   xSemaphoreGive(relayLock);
   return true;
 }
-bool cloudFresh() { const uint32_t t=lastCloudOK.load(); return uint32_t(millis()-t)<CLOUD_LOSS_MS; }
 bool startHold(uint8_t i,bool remote) {
   if(!timerReady||!relayLock||i>=4||updating||WiFi.status()!=WL_CONNECTED) return false;
   xSemaphoreTake(relayLock,portMAX_DELAY);
@@ -259,7 +259,7 @@ void report() {
   Serial.println("]}");
 }
 void help() {
-  Serial.println("HELP | STATUS | PULSE <1-4> <50-10000 ms> | OFF <1-4> | ALL OFF | RATE <250-60000 ms>");
+  Serial.println("HELP | STATUS | PULSE <1-4> <50-86400000 ms> | OFF <1-4> | ALL OFF | RATE <250-60000 ms>");
 }
 bool parseUInt(const char* s, uint32_t &out) {
   if (!s || !*s) return false;
@@ -291,7 +291,7 @@ void command(char* input) {
     offRelay(i - 1); Serial.println("OK OFF"); return;
   }
   if (!strcmp(cmd, "PULSE") && !extra && parseUInt(a, i) && i >= 1 && i <= 4 &&
-      parseUInt(b, ms) && startPulse(i - 1, ms)) {
+      parseUInt(b, ms) && startPulse(i - 1, ms, false)) {
     Serial.println("OK PULSE"); return;
   }
   if (!strcmp(cmd, "RATE") && !b && parseUInt(a, ms) && ms >= 250 && ms <= 60000) {
@@ -319,11 +319,11 @@ void readSerial() {
 
 const char PAGE[] PROGMEM = R"YARUMOHTML(<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Yarumo IoT X4</title><style>
 *{box-sizing:border-box}body{margin:0;background:#eef3f7;color:#152b3c;font:16px system-ui,sans-serif}header{background:#153d55;color:white;padding:20px}main{max-width:900px;margin:auto;padding:16px}h1{margin:0;font-size:25px}h2{font-size:19px}p{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.card{background:white;border:1px solid #d5e0e9;border-radius:12px;padding:14px}.val{font-size:24px;font-weight:bold;margin:8px 0}.muted{color:#526879;font-size:13px}button,input{font:inherit;padding:10px;border-radius:7px}button{border:0;background:#176b80;color:white;cursor:pointer;margin:4px 0}button:disabled{opacity:.45}button.off{background:#933e3e}input{width:100%;border:1px solid #aebfcb}.status{padding:10px;background:white;border-radius:8px;min-height:42px}.on{color:#077346}.idle{color:#526879}footer{font-size:13px;margin:20px 0;color:#526879}
-</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.3.3 · Panel local</p></header><main>
+</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.3.5 · Panel local</p></header><main>
 <p id="status" class="status" role="status">Conectando...</p><p id="info" class="muted"></p>
 <h2>Entradas digitales</h2><div id="di" class="grid"></div>
 <h2>Entradas analógicas</h2><div id="ai" class="grid"></div>
-<h2>Relés y temporización</h2><p>Selecciona un pulso de 0,05 a 10 segundos. No se prolonga un pulso activo.</p>
+<h2>Relés y temporización</h2><p>Selecciona un pulso de 0,05 a 86400 segundos (24 h). No se prolonga un pulso activo.</p>
 <div id="relays" class="grid"></div><button class="off" id="all" disabled>Apagar todos</button>
 <footer>Banco de pruebas: sin cargas conectadas. El estado mostrado es la orden GPIO, no la posición física del contacto. Acceso únicamente en red local de confianza.</footer></main>
 <script>
@@ -333,13 +333,13 @@ let online=false,busy=false,states=[0,0,0,0],polling=false;
 function init(){
 diPins.forEach((p,i)=>{$('di').insertAdjacentHTML('beforeend','<div class="card">DI'+(i+1)+' · GPIO'+p+'<div class="val" id="d'+i+'">--</div></div>')});
 aiPins.forEach((p,i)=>{$('ai').insertAdjacentHTML('beforeend','<div class="card">AI'+(i+1)+' · GPIO'+p+'<div class="val" id="a'+i+'">--</div><div class="muted" id="raw'+i+'"></div></div>')});
-doPins.forEach((p,i)=>{$('relays').insertAdjacentHTML('beforeend','<div class="card">Relé '+(i+1)+' · GPIO'+p+'<div class="val" id="r'+i+'">--</div><div class="muted" id="t'+i+'"></div><label>Tiempo (s)<input id="sec'+i+'" type="number" min=".05" max="10" step=".05" value="2"></label><button id="hold'+i+'" disabled>Encender</button> <button id="go'+i+'" disabled>Pulso</button> <button class="off" id="off'+i+'" disabled>Apagar</button></div>');$('hold'+i).onclick=()=>send('on',i+1);$('go'+i).onclick=()=>pulse(i);$('off'+i).onclick=()=>send('off',i+1)});
+doPins.forEach((p,i)=>{$('relays').insertAdjacentHTML('beforeend','<div class="card">Relé '+(i+1)+' · GPIO'+p+'<div class="val" id="r'+i+'">--</div><div class="muted" id="t'+i+'"></div><label>Tiempo (s)<input id="sec'+i+'" type="number" min=".05" max="86400" step=".05" value="2"></label><button id="hold'+i+'" disabled>Encender</button> <button id="go'+i+'" disabled>Pulso</button> <button class="off" id="off'+i+'" disabled>Apagar</button></div>');$('hold'+i).onclick=()=>send('on',i+1);$('go'+i).onclick=()=>pulse(i);$('off'+i).onclick=()=>send('off',i+1)});
 $('all').onclick=()=>send('all',0);refresh();setInterval(refresh,750);}
 function controls(){doPins.forEach((p,i)=>{$('hold'+i).disabled=!online||busy||!!states[i];$('go'+i).disabled=!online||busy||!!states[i];$('off'+i).disabled=!online||busy});$('all').disabled=!online||busy;}
 async function refresh(){if(polling||busy)return;polling=true;try{const r=await fetch('/api/status',{cache:'no-store',signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();online=true;states=s.relay_cmd;$('status').textContent='Conectado';$('info').textContent='ID '+s.device+' · Firmware '+s.version;
 s.di.forEach((v,i)=>{$('d'+i).textContent=v?'HIGH':'LOW';$('d'+i).className='val '+(v?'on':'idle')});s.ai_mv.forEach((v,i)=>{$('a'+i).textContent=v+' mV';$('raw'+i).textContent='ADC '+s.ai_raw[i]+' / 4095'});states.forEach((v,i)=>{$('r'+i).textContent=v?'ON':'OFF';$('r'+i).className='val '+(v?'on':'idle');$('t'+i).textContent=v?(s.remaining_ms[i]>0?(s.remaining_ms[i]/1000).toFixed(1)+' s restantes':'Encendido continuo'):'Apagado'});
 }catch(e){online=false;$('status').textContent='Sin conexión o lectura no disponible';}finally{polling=false;controls();}}
-function pulse(i){const v=Number($('sec'+i).value);if(!Number.isFinite(v)||v<.05||v>10){alert('Tiempo entre 0,05 y 10 s');return;}send('pulse',i+1,Math.round(v*1000));}
+function pulse(i){const v=Number($('sec'+i).value);if(!Number.isFinite(v)||v<.05||v>86400){alert('Tiempo entre 0,05 y 86400 s');return;}send('pulse',i+1,Math.round(v*1000));}
 async function send(action,n,ms=0){if(!online||busy)return;busy=true;controls();try{const body=new URLSearchParams({action,n:String(n),ms:String(ms)});const r=await fetch('/api/relay',{method:'POST',headers:{'X-Yarumo-Control':'1'},body,signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error(await r.text());}catch(e){alert('No confirmado: '+e.message);}finally{busy=false;await refresh();controls();}}
 init();
 </script></body></html>)YARUMOHTML";
@@ -364,7 +364,8 @@ String statusJson() {
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=String(analogReadMilliVolts(AI[i])); }
   j += "],\"relay_cmd\":[";
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=on[i]?'1':'0'; }
-  j += "],\"hold_supported\":true,\"remaining_ms\":[";
+  j += "],\"hold_supported\":true,\"max_pulse_ms\":"; j += String(MAX_PULSE_MS);
+  j += ",\"remaining_ms\":[";
   for (uint8_t i=0;i<4;i++) { if(i)j+=','; j+=String(remaining[i]); }
   j += "]}"; return j;
 }
@@ -379,7 +380,7 @@ void webRelay() {
   if (action=="off") { offRelay(n-1); web.send(200,"text/plain","OK"); return; }
   if (action=="on") { if(startHold(n-1,false)) web.send(200,"text/plain","OK"); else web.send(409,"text/plain","Relay busy or not available"); return; }
   if (action=="pulse" && parseUInt(web.arg("ms").c_str(),ms) && ms>=50 && ms<=MAX_PULSE_MS) {
-    if (startPulse(n-1,ms)) web.send(200,"text/plain","OK");
+    if (startPulse(n-1,ms,false)) web.send(200,"text/plain","OK");
     else web.send(409,"text/plain","Relay busy or not available");
     return;
   }
@@ -493,7 +494,7 @@ void tickCloud() {
       else if(o.relay>=1&&o.relay<=4){
         if(!strcmp(o.action,"off")){offRelay(o.relay-1);ok=true;}
         else if(!strcmp(o.action,"on")&&o.ms==0)ok=startHold(o.relay-1,true);
-        else if(!strcmp(o.action,"pulse"))ok=startPulse(o.relay-1,o.ms);
+        else if(!strcmp(o.action,"pulse"))ok=startPulse(o.relay-1,o.ms,true);
       }
     }
     CloudAck ack={};strlcpy(ack.id,o.id,sizeof(ack.id));ack.executed=ok;xQueueOverwrite(ackQueue,&ack);
