@@ -24,6 +24,7 @@ export const validEpoch=v=>typeof v==='string'&&/^[0-9a-f]{16}$/.test(v);
 export function canControl(s,revision,epoch){
  return canTransfer(s)&&s.plc_control===true&&isUuid(revision)&&s.plc_revision===revision&&validEpoch(epoch)&&s.plc_epoch===epoch;
 }
+export function canManual(s,revision,epoch){return canControl(s,revision,epoch)&&s.plc_locked===true;}
 export function registerPlcRoutes(app,{pool,auth,csrf,asyncRoute,throttle}){
  app.get('/api/devices/:id/plc',auth,asyncRoute(async(req,res)=>{
   if(!isUuid(req.params.id))return res.sendStatus(400);
@@ -64,13 +65,13 @@ export function registerPlcRoutes(app,{pool,auth,csrf,asyncRoute,throttle}){
  }));
  app.post('/api/devices/:id/plc/control',csrf,auth,throttle('plccontrol:',20,60000),asyncRoute(async(req,res)=>{
   const {revision,epoch,kind,auto}=req.body||{};
-  if(!isUuid(req.params.id)||!isUuid(revision)||!validEpoch(epoch)||!['run','boot'].includes(kind)||(kind==='boot'&&typeof auto!=='boolean'))return res.sendStatus(400);
+  if(!isUuid(req.params.id)||!isUuid(revision)||!validEpoch(epoch)||!['run','boot','manual'].includes(kind)||(kind==='boot'&&typeof auto!=='boolean'))return res.sendStatus(400);
   const c=await pool.connect();try{await c.query('BEGIN');
    const d=await c.query("SELECT snapshot,COALESCE(last_seen>now()-interval '15 seconds',false) AS online FROM devices WHERE id=$1 AND owner_id=$2 FOR UPDATE",[req.params.id,req.user.id]);
    if(!d.rowCount){await c.query('ROLLBACK');return res.sendStatus(404);}
-   if(!d.rows[0].online||!canControl(d.rows[0].snapshot,revision,epoch)){await c.query('ROLLBACK');return res.status(409).json({error:'Requiere firmware 0.5.1, STOP, salidas apagadas y revisión instalada actual. Actualiza estado.'});}
+   if(!d.rows[0].online||!(kind==='manual'?canManual(d.rows[0].snapshot,revision,epoch):canControl(d.rows[0].snapshot,revision,epoch))){await c.query('ROLLBACK');return res.status(409).json({error:'Requiere firmware 0.5.1, STOP, salidas apagadas y revisión instalada actual. Actualiza estado.'});}
    const p=await c.query('SELECT revision FROM plc_programs WHERE device_id=$1 AND revision=$2',[req.params.id,revision]);
-   if(!p.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'La revisión guardada no coincide con la instalada'});}
+   if(kind!=='manual'&&!p.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'La revisión guardada no coincide con la instalada'});}
    await expirePlc(c,req.params.id);
    const pending=await c.query("SELECT 1 FROM plc_jobs WHERE device_id=$1 AND state IN ('queued','delivered')",[req.params.id]);
    const manual=await c.query("SELECT 1 FROM commands WHERE device_id=$1 AND state IN ('queued','delivered') AND expires_at>now()",[req.params.id]);
@@ -87,7 +88,7 @@ export async function expirePlc(c,id){
 }
 export async function acknowledgePlc(c,id,s,ack){
  if(ack&&isUuid(ack.id)&&['executed','rejected'].includes(ack.state)){
-  await c.query("UPDATE plc_jobs SET state=CASE WHEN $1='executed' AND (revision::text<>$4 OR (program->>'kind'='run' AND $5<>'RUN') OR (program->>'kind'='boot' AND COALESCE(program->>'auto','false')<>$6)) THEN 'unknown' ELSE $1 END,finished_at=now() WHERE id=$2 AND device_id=$3 AND state='delivered'",[ack.state,ack.id,id,s.plc_revision||'',s.plc_mode||'',String(s.plc_auto===true)]);
+  await c.query("UPDATE plc_jobs SET state=CASE WHEN $1='executed' AND (revision::text<>$4 OR (program->>'kind'='run' AND $5<>'RUN') OR (program->>'kind'='boot' AND COALESCE(program->>'auto','false')<>$6) OR (program->>'kind'='manual' AND ($5<>'STOP' OR $6<>'false' OR $7<>'false'))) THEN 'unknown' ELSE $1 END,finished_at=now() WHERE id=$2 AND device_id=$3 AND state='delivered'",[ack.state,ack.id,id,s.plc_revision||'',s.plc_mode||'',String(s.plc_auto===true),String(s.plc_locked===true)]);
  }
 }
 export async function pollPlc(c,id,s,ack){
@@ -97,7 +98,7 @@ export async function pollPlc(c,id,s,ack){
  if(!r.rowCount)return null;
  const j=r.rows[0];
  const kind=j.program?.kind||'transfer';
- if(kind==='transfer'?!canTransfer(s):!['run','boot'].includes(kind)||!canControl(s,j.revision,j.program.epoch)){await c.query("UPDATE plc_jobs SET state='rejected',finished_at=now() WHERE id=$1",[j.id]);return null;}
+ if(kind==='transfer'?!canTransfer(s):!['run','boot','manual'].includes(kind)||!(kind==='manual'?canManual(s,j.revision,j.program.epoch):canControl(s,j.revision,j.program.epoch))){await c.query("UPDATE plc_jobs SET state='rejected',finished_at=now() WHERE id=$1",[j.id]);return null;}
  await c.query("UPDATE plc_jobs SET state='delivered',delivered_at=now() WHERE id=$1",[j.id]);
- return {id:j.id,action:kind==='run'?'plcrun':kind==='boot'?'plcboot':'plcset',relay:0,ms:0,ttl_ms:j.ttl_ms,revision:j.revision,...(kind==='transfer'?{program:j.program}:{epoch:j.program.epoch,...(kind==='boot'?{auto:j.program.auto}:{})})};
+ return {id:j.id,action:kind==='run'?'plcrun':kind==='boot'?'plcboot':kind==='manual'?'plcman':'plcset',relay:0,ms:0,ttl_ms:j.ttl_ms,revision:j.revision,...(kind==='transfer'?{program:j.program}:{epoch:j.program.epoch,...(kind==='boot'?{auto:j.program.auto}:{})})};
 }
