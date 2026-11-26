@@ -20,13 +20,17 @@ export function prepareProgram(graph){
 export function canTransfer(s){
  return s?.plc_transfer===true&&s.plc_mode==='STOP'&&s.plc_simulation!==true&&Array.isArray(s.relay_cmd)&&s.relay_cmd.length===4&&s.relay_cmd.every(v=>v===0);
 }
+export const validEpoch=v=>typeof v==='string'&&/^[0-9a-f]{16}$/.test(v);
+export function canControl(s,revision,epoch){
+ return canTransfer(s)&&s.plc_control===true&&isUuid(revision)&&s.plc_revision===revision&&validEpoch(epoch)&&s.plc_epoch===epoch;
+}
 export function registerPlcRoutes(app,{pool,auth,csrf,asyncRoute,throttle}){
  app.get('/api/devices/:id/plc',auth,asyncRoute(async(req,res)=>{
   if(!isUuid(req.params.id))return res.sendStatus(400);
   const d=await pool.query('SELECT id FROM devices WHERE id=$1 AND owner_id=$2',[req.params.id,req.user.id]);
   if(!d.rowCount)return res.sendStatus(404);
   const p=await pool.query('SELECT revision,graph,updated_at FROM plc_programs WHERE device_id=$1',[req.params.id]);
-  const j=await pool.query('SELECT id,revision,state,created_at,finished_at FROM plc_jobs WHERE device_id=$1 ORDER BY created_at DESC LIMIT 10',[req.params.id]);
+  const j=await pool.query('SELECT id,revision,state,COALESCE(program->>'kind','transfer') AS kind,created_at,finished_at FROM plc_jobs WHERE device_id=$1 ORDER BY created_at DESC LIMIT 10',[req.params.id]);
   res.json({saved:p.rows[0]||null,jobs:j.rows});
  }));
  app.post('/api/devices/:id/plc/save',csrf,auth,throttle('plcsave:',30,60000),asyncRoute(async(req,res)=>{
@@ -58,21 +62,42 @@ export function registerPlcRoutes(app,{pool,auth,csrf,asyncRoute,throttle}){
    await c.query('COMMIT');res.status(202).json({id,revision:p.rows[0].revision,state:'queued'});
   }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
  }));
+ app.post('/api/devices/:id/plc/control',csrf,auth,throttle('plccontrol:',20,60000),asyncRoute(async(req,res)=>{
+  const {revision,epoch,kind,auto}=req.body||{};
+  if(!isUuid(req.params.id)||!isUuid(revision)||!validEpoch(epoch)||!['run','boot'].includes(kind)||(kind==='boot'&&typeof auto!=='boolean'))return res.sendStatus(400);
+  const c=await pool.connect();try{await c.query('BEGIN');
+   const d=await c.query("SELECT snapshot,COALESCE(last_seen>now()-interval '15 seconds',false) AS online FROM devices WHERE id=$1 AND owner_id=$2 FOR UPDATE",[req.params.id,req.user.id]);
+   if(!d.rowCount){await c.query('ROLLBACK');return res.sendStatus(404);}
+   if(!d.rows[0].online||!canControl(d.rows[0].snapshot,revision,epoch)){await c.query('ROLLBACK');return res.status(409).json({error:'Requiere firmware 0.5.1, STOP, salidas apagadas y revisión instalada actual. Actualiza estado.'});}
+   const p=await c.query('SELECT revision FROM plc_programs WHERE device_id=$1 AND revision=$2',[req.params.id,revision]);
+   if(!p.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'La revisión guardada no coincide con la instalada'});}
+   await expirePlc(c,req.params.id);
+   const pending=await c.query("SELECT 1 FROM plc_jobs WHERE device_id=$1 AND state IN ('queued','delivered')",[req.params.id]);
+   const manual=await c.query("SELECT 1 FROM commands WHERE device_id=$1 AND state IN ('queued','delivered') AND expires_at>now()",[req.params.id]);
+   if(pending.rowCount||manual.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Hay una orden pendiente'});}
+   const id=randomUUID(),payload={kind,epoch,...(kind==='boot'?{auto}:{})};
+   await c.query("INSERT INTO plc_jobs(id,device_id,revision,program,state,expires_at) VALUES($1,$2,$3,$4,'queued',now()+interval '10 seconds')",[id,req.params.id,revision,JSON.stringify(payload)]);
+   await c.query('COMMIT');res.status(202).json({id,revision,state:'queued'});
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+ }));
 }
 export async function expirePlc(c,id){
  await c.query("UPDATE plc_jobs SET state='expired',finished_at=now() WHERE device_id=$1 AND state='queued' AND expires_at<=now()",[id]);
  await c.query("UPDATE plc_jobs SET state='unknown',finished_at=now() WHERE device_id=$1 AND state='delivered' AND delivered_at<now()-interval '30 seconds'",[id]);
 }
-export async function pollPlc(c,id,s,ack){
+export async function acknowledgePlc(c,id,s,ack){
  if(ack&&isUuid(ack.id)&&['executed','rejected'].includes(ack.state)){
-  // A successful transfer is acknowledged only with the installed revision reported by the device.
-  await c.query("UPDATE plc_jobs SET state=CASE WHEN $1='executed' AND revision::text<>$4 THEN 'unknown' ELSE $1 END,finished_at=now() WHERE id=$2 AND device_id=$3 AND state='delivered'",[ack.state,ack.id,id,s.plc_revision||'']);
+  await c.query("UPDATE plc_jobs SET state=CASE WHEN $1='executed' AND (revision::text<>$4 OR (program->>'kind'='run' AND $5<>'RUN') OR (program->>'kind'='boot' AND COALESCE(program->>'auto','false')<>$6)) THEN 'unknown' ELSE $1 END,finished_at=now() WHERE id=$2 AND device_id=$3 AND state='delivered'",[ack.state,ack.id,id,s.plc_revision||'',s.plc_mode||'',String(s.plc_auto===true)]);
  }
+}
+export async function pollPlc(c,id,s,ack){
+ await acknowledgePlc(c,id,s,ack);
  await expirePlc(c,id);
  const r=await c.query("SELECT id,revision,program,GREATEST(0,floor(extract(epoch FROM (expires_at-clock_timestamp()))*1000))::int AS ttl_ms FROM plc_jobs WHERE device_id=$1 AND state='queued' AND expires_at>clock_timestamp() ORDER BY created_at LIMIT 1 FOR UPDATE",[id]);
  if(!r.rowCount)return null;
  const j=r.rows[0];
- if(!canTransfer(s)){await c.query("UPDATE plc_jobs SET state='rejected',finished_at=now() WHERE id=$1",[j.id]);return null;}
+ const kind=j.program?.kind||'transfer';
+ if(kind==='transfer'?!canTransfer(s):!['run','boot'].includes(kind)||!canControl(s,j.revision,j.program.epoch)){await c.query("UPDATE plc_jobs SET state='rejected',finished_at=now() WHERE id=$1",[j.id]);return null;}
  await c.query("UPDATE plc_jobs SET state='delivered',delivered_at=now() WHERE id=$1",[j.id]);
- return {id:j.id,action:'plcset',relay:0,ms:0,ttl_ms:j.ttl_ms,revision:j.revision,program:j.program};
+ return {id:j.id,action:kind==='run'?'plcrun':kind==='boot'?'plcboot':'plcset',relay:0,ms:0,ttl_ms:j.ttl_ms,revision:j.revision,...(kind==='transfer'?{program:j.program}:{epoch:j.program.epoch,...(kind==='boot'?{auto:j.program.auto}:{})})};
 }
