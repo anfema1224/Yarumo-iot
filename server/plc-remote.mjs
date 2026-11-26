@@ -30,7 +30,7 @@ export function registerPlcRoutes(app,{pool,auth,csrf,asyncRoute,throttle}){
   const d=await pool.query('SELECT id FROM devices WHERE id=$1 AND owner_id=$2',[req.params.id,req.user.id]);
   if(!d.rowCount)return res.sendStatus(404);
   const p=await pool.query('SELECT revision,graph,updated_at FROM plc_programs WHERE device_id=$1',[req.params.id]);
-  const j=await pool.query('SELECT id,revision,state,COALESCE(program->>'kind','transfer') AS kind,created_at,finished_at FROM plc_jobs WHERE device_id=$1 ORDER BY created_at DESC LIMIT 10',[req.params.id]);
+  const j=await pool.query("SELECT id,revision,state,COALESCE(program->>'kind','transfer') AS kind,created_at,finished_at FROM plc_jobs WHERE device_id=$1 ORDER BY created_at DESC LIMIT 10",[req.params.id]);
   res.json({saved:p.rows[0]||null,jobs:j.rows});
  }));
  app.post('/api/devices/:id/plc/save',csrf,auth,throttle('plcsave:',30,60000),asyncRoute(async(req,res)=>{
