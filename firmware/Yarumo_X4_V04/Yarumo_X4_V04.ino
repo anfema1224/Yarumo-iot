@@ -489,15 +489,15 @@ bool decodeProgram(const String& raw,yarumo::Program& p){
 }
 bool restorePhysical(){
   if(!nvsOK)return false;
-  size_t n=prefs.getString("plc_v1").length();if(!n||n>8192)return false;
-  yarumo::Program p;if(!decodeProgram(prefs.getString("plc_v1"),p))return false;
+  String raw=prefs.getString("plc_v1");if(!raw.length()||raw.length()>8192)return false;
+  yarumo::Program p;if(!decodeProgram(raw,p))return false;
   physicalInstalled=plcPhysical.install(p);return physicalInstalled;
 }
 bool installPhysical(const String& raw){
   if(simulationLock||physicalRunning()||!nvsOK||!timerReady)return false;
   yarumo::Program p;if(!decodeProgram(raw,p))return false;
   physicalLock=true;allOff();
-  if(prefs.putString("plc_v1",raw)!=raw.length()||prefs.getString("plc_v1")!=raw)return false;
+  if(prefs.putString("plc_v1",raw)!=raw.length()||prefs.getString("plc_v1")!=raw){physicalInstalled=false;return false;}
   physicalInstalled=plcPhysical.install(p);return physicalInstalled;
 }
 bool armPhysical(){
@@ -730,7 +730,7 @@ void setup() {
     help();
     return;
   }
-  if(restorePhysical()){physicalLock=true;Serial.println("PLC: program restored in STOP");}
+  if(restorePhysical())Serial.println("PLC: program restored in STOP; manual mode available until explicit RUN");
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.setPassword(OTA_PASS);
   ArduinoOTA.onStart([]() { updating = true; cloudPaused.store(true); simStop(); allOff(); });
