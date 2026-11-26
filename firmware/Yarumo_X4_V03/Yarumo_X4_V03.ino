@@ -1,7 +1,7 @@
 /*
  * Yarumo IoT V0.3 - ESP32 Relay X4 - banco de pruebas.
  * Arduino ESP32 Dev Module, particiones compatibles con OTA.
- * Completar credenciales SOLO en copia local; no subirlas a GitHub.
+ * Credenciales persistentes en NVS; provisionar una vez con secrets.h local.
  * Probar con contactos de rele sin cargas. DI/AI maximo 3.3 V.
  */
 #include <Arduino.h>
@@ -14,6 +14,8 @@
 #include <ArduinoJson.h> // v7
 #include <time.h>
 #include <atomic>
+#include <memory>
+#include <new>
 #include <freertos/queue.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -23,16 +25,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-constexpr char VERSION[] = "0.3.0";
-constexpr char WIFI_SSID[] = "TU_RED_WIFI";
-constexpr char WIFI_PASS[] = "TU_CLAVE_WIFI";
-constexpr char OTA_PASS[] = "TU_CLAVE_OTA";
+// Optional ONE-TIME provisioning file. Ignored by Git.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#define YARUMO_HAS_SECRETS 1
+#endif
+#ifndef YARUMO_REPLACE_CONFIG
+#define YARUMO_REPLACE_CONFIG 0
+#endif
+
+constexpr char VERSION[] = "0.3.1";
+char WIFI_SSID[33] = {};
+char WIFI_PASS[65] = {};
+char OTA_PASS[129] = {};
 constexpr char WEB_USER[] = "admin";
-constexpr char WEB_PASS[] = "TU_CLAVE_WEB"; // Cambiar en copia local (minimo 12 caracteres)
-// Activar nube solo con URL HTTPS, token y CA reales en copia local.
-constexpr char CLOUD_URL[] = "https://TU_SERVICIO.onrender.com/api/device/poll";
-constexpr char CLOUD_TOKEN[] = "TU_TOKEN_DISPOSITIVO";
-constexpr char CLOUD_CA[] = ""; // PEM de la CA raiz validada del servidor. Nunca setInsecure().
+char WEB_PASS[129] = {};
+constexpr char CLOUD_URL[] = "https://yarumo-iot.onrender.com/api/device/poll";
+char CLOUD_TOKEN[65] = {};
+char CLOUD_CA[4096] = {};
+bool configReady = false;
 constexpr char HOSTNAME[] = "Yarumo-X4";
 constexpr uint8_t DI[] = {13, 14, 16, 17, 19, 27};
 constexpr uint8_t AI[] = {34, 35, 36, 39};
@@ -57,6 +68,83 @@ char deviceId[13] = {};
 char line[80] = {};
 size_t lineLen = 0;
 bool discardLine = false;
+
+// One versioned NVS blob; never print credentials. No writes on normal boot.
+// Keep this namespace/key stable across releases and compatible OTA partitions.
+constexpr char CFG_KEY[] = "cfg_v1";
+constexpr size_t CFG_MAX = 8192;
+template <size_t N>
+bool copyField(JsonObjectConst obj, const char* name, char (&dest)[N]) {
+  if (!obj[name].is<const char*>()) return false;
+  const char* value = obj[name].as<const char*>();
+  if (strlen(value) >= N) return false;
+  strlcpy(dest, value, N);
+  return true;
+}
+bool loadFields(JsonObjectConst obj) {
+  if (obj["schema"].as<int>() != 1) return false;
+  if (!copyField(obj,"ssid",WIFI_SSID) || !copyField(obj,"wifi",WIFI_PASS) ||
+      !copyField(obj,"ota",OTA_PASS) || !copyField(obj,"web",WEB_PASS) ||
+      !copyField(obj,"token",CLOUD_TOKEN) || !copyField(obj,"ca",CLOUD_CA)) return false;
+  if (!WIFI_SSID[0] || !strcmp(WIFI_SSID,"TU_RED_WIFI") ||
+      strlen(WIFI_PASS)<8 || !strcmp(WIFI_PASS,"TU_CLAVE_WIFI") ||
+      !OTA_PASS[0] || !strcmp(OTA_PASS,"TU_CLAVE_OTA") ||
+      strlen(WEB_PASS)<12 || !strcmp(WEB_PASS,"TU_CLAVE_WEB")) return false;
+  if (CLOUD_TOKEN[0]) {
+    if(strlen(CLOUD_TOKEN)!=64) return false;
+    for(const char* p=CLOUD_TOKEN; *p; ++p)
+      if(!((*p>='0'&&*p<='9')||(*p>='a'&&*p<='f'))) return false;
+  }
+  if(CLOUD_CA[0] && (!strstr(CLOUD_CA,"-----BEGIN CERTIFICATE-----") ||
+                      !strstr(CLOUD_CA,"-----END CERTIFICATE-----"))) return false;
+  return true;
+}
+bool readStoredConfig() {
+  size_t n=prefs.getBytesLength(CFG_KEY);
+  if (!n || n>CFG_MAX) return false;
+  std::unique_ptr<char[]> raw(new(std::nothrow) char[n+1]);
+  if (!raw || prefs.getBytes(CFG_KEY,raw.get(),n)!=n) return false;
+  raw[n]='\0';
+  JsonDocument doc;
+  if (deserializeJson(doc,raw.get(),n)) return false;
+  return loadFields(doc.as<JsonObjectConst>());
+}
+bool initConfig() {
+  if (!nvsOK) { Serial.println("CONFIG: NVS unavailable; network disabled"); return false; }
+  const bool exists=prefs.isKey(CFG_KEY);
+#if defined(YARUMO_HAS_SECRETS)
+  if (!exists || YARUMO_REPLACE_CONFIG) {
+    JsonDocument doc;
+    doc["schema"]=1;
+    doc["ssid"]=YARUMO_WIFI_SSID;
+    doc["wifi"]=YARUMO_WIFI_PASS;
+    doc["ota"]=YARUMO_OTA_PASS;
+    doc["web"]=YARUMO_WEB_PASS;
+    doc["token"]=YARUMO_CLOUD_TOKEN;
+    doc["ca"]=YARUMO_CLOUD_CA;
+    if (loadFields(doc.as<JsonObjectConst>())) {
+      String encoded;
+      serializeJson(doc,encoded);
+      const size_t n=encoded.length();
+      if (n && n<=CFG_MAX && prefs.putBytes(CFG_KEY,encoded.c_str(),n)==n &&
+          readStoredConfig()) {
+        Serial.println("CONFIG: saved to NVS");
+        return true;
+      }
+      Serial.println("CONFIG: could not save credentials");
+    } else Serial.println("CONFIG: invalid secrets.h");
+    // Preserve prior usable configuration if provisioning validation fails.
+    if(exists && readStoredConfig()){Serial.println("CONFIG: previous NVS configuration loaded");return true;}
+    return false;
+  }
+#endif
+  if (exists && readStoredConfig()) {
+    Serial.println("CONFIG: loaded from NVS");
+    return true;
+  }
+  Serial.println("CONFIG: missing or invalid; provision with secrets.h over USB");
+  return false;
+}
 
 void offLocked(uint8_t i) {
   digitalWrite(DO_PIN[i], RELAY_OFF);
@@ -185,7 +273,7 @@ void readSerial() {
 
 const char PAGE[] PROGMEM = R"YARUMOHTML(<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Yarumo IoT X4</title><style>
 *{box-sizing:border-box}body{margin:0;background:#eef3f7;color:#152b3c;font:16px system-ui,sans-serif}header{background:#153d55;color:white;padding:20px}main{max-width:900px;margin:auto;padding:16px}h1{margin:0;font-size:25px}h2{font-size:19px}p{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.card{background:white;border:1px solid #d5e0e9;border-radius:12px;padding:14px}.val{font-size:24px;font-weight:bold;margin:8px 0}.muted{color:#526879;font-size:13px}button,input{font:inherit;padding:10px;border-radius:7px}button{border:0;background:#176b80;color:white;cursor:pointer;margin:4px 0}button:disabled{opacity:.45}button.off{background:#933e3e}input{width:100%;border:1px solid #aebfcb}.status{padding:10px;background:white;border-radius:8px;min-height:42px}.on{color:#077346}.idle{color:#526879}footer{font-size:13px;margin:20px 0;color:#526879}
-</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.3.0 · Panel local</p></header><main>
+</style></head><body><header><h1>Yarumo IoT</h1><p>ESP32 Relay X4 · V0.3.1 · Panel local</p></header><main>
 <p id="status" class="status" role="status">Conectando...</p><p id="info" class="muted"></p>
 <h2>Entradas digitales</h2><div id="di" class="grid"></div>
 <h2>Entradas analógicas</h2><div id="ai" class="grid"></div>
@@ -337,7 +425,7 @@ void cloudTask(void*) {
 }
 void startCloud() {
   if(strncmp(CLOUD_URL,"https://",8)||!validHexToken()||!strstr(CLOUD_CA,"-----BEGIN CERTIFICATE-----")){
-    Serial.println("Cloud disabled: configure URL, token and root CA");return;
+    Serial.println("Cloud disabled: missing token or root CA in persistent configuration");return;
   }
   sampleQueue=xQueueCreate(1,sizeof(CloudSample));orderQueue=xQueueCreate(1,sizeof(CloudOrder));
   ackQueue=xQueueCreate(1,sizeof(CloudAck));
@@ -369,6 +457,7 @@ void tickCloud() {
 }
 
 void tickWiFi() {
+  if(!configReady) return;
   const bool up = WiFi.status() == WL_CONNECTED;
   if (up && !wifiWasUp) {
     Serial.print("WiFi IP: "); Serial.println(WiFi.localIP());
@@ -419,6 +508,13 @@ void setup() {
   if (nvsOK) {
     uint32_t saved = prefs.getUInt("rate", DEFAULT_RATE);
     if (saved >= 250 && saved <= 60000) reportRate = saved;
+  }
+  configReady=initConfig();
+  if(!configReady){
+    allOff();
+    Serial.printf("Yarumo IoT %s | ID %s | configuration required\n",VERSION,deviceId);
+    help();
+    return;
   }
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.setPassword(OTA_PASS);
